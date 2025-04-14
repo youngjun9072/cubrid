@@ -43,13 +43,13 @@
 #include "transaction_cl.h"
 #include "dbtype.h"
 
-#define DB_OID_INCLUDED(r)      ((r)->oid_included == true)
-#define DB_INVALID_INDEX(i,cnt) ((i) < 0 || (i) >= (cnt))
-#define DB_INVALID_RESTYPE(t)                \
-                       ((t) != T_SELECT &&   \
-                        (t) != T_CALL &&     \
-                        (t) != T_OBJFETCH && \
-                        (t) != T_GET)
+#define DB_OID_INCLUDED(r) ((r)->oid_included == true)
+#define DB_INVALID_INDEX(i, cnt) ((i) < 0 || (i) >= (cnt))
+#define DB_INVALID_RESTYPE(t) \
+  ((t) != T_SELECT &&         \
+   (t) != T_CALL &&           \
+   (t) != T_OBJFETCH &&       \
+   (t) != T_GET)
 
 #define PLAN_BUF_INITIAL_LENGTH (1024)
 
@@ -57,39 +57,36 @@
    query result structures. */
 struct alloc_resource
 {
-  int free_qres_cnt;		/* number of free query_result structures */
-  int max_qres_cnt;		/* maximum number of free structures to keep */
-  DB_QUERY_RESULT *free_qres_list;	/* list of free query entry structures */
+  int free_qres_cnt;               /* number of free query_result structures */
+  int max_qres_cnt;                /* maximum number of free structures to keep */
+  DB_QUERY_RESULT *free_qres_list; /* list of free query entry structures */
 };
 
 static struct
-{				/* global query table variable */
-  int qres_cnt;			/* number of active query entries */
-  int qres_closed_cnt;		/* number of closed query entries */
-  int entry_cnt;		/* # of result list entries */
-  DB_QUERY_RESULT **qres_list;	/* list of query result entries */
-  struct alloc_resource alloc_res;	/* allocation structure resource */
+{                                  /* global query table variable */
+  int qres_cnt;                    /* number of active query entries */
+  int qres_closed_cnt;             /* number of closed query entries */
+  int entry_cnt;                   /* # of result list entries */
+  DB_QUERY_RESULT **qres_list;     /* list of query result entries */
+  struct alloc_resource alloc_res; /* allocation structure resource */
 } Qres_table =
-{
-  0, 0, 0, (DB_QUERY_RESULT **) NULL,
-  {
-  0, 0, (DB_QUERY_RESULT *) NULL}
-};				/* query result table */
+    {
+        0, 0, 0, (DB_QUERY_RESULT **)NULL, {0, 0, (DB_QUERY_RESULT *)NULL}}; /* query result table */
 
 static const int QP_QRES_LIST_INIT_CNT = 10;
-			       /* query result list initial cnt */
+/* query result list initial cnt */
 static const float QP_QRES_LIST_INC_RATE = 1.25f;
-			   /* query result list increment ratio */
+/* query result list increment ratio */
 
 static char *db_Execution_plan = NULL;
 static int db_Execution_plan_length = -1;
 
-static DB_QUERY_RESULT *allocate_query_result (void);
-static void free_query_result (DB_QUERY_RESULT * q_res);
-static DB_QUERY_TYPE *db_cp_query_type_helper (DB_QUERY_TYPE * src, DB_QUERY_TYPE * dest);
-static int or_packed_query_format_size (const DB_QUERY_TYPE * q, int *count);
-static char *or_pack_query_format (char *buf, const DB_QUERY_TYPE * q, const int count);
-static char *or_unpack_query_format (char *buf, DB_QUERY_TYPE ** q);
+static DB_QUERY_RESULT *allocate_query_result(void);
+static void free_query_result(DB_QUERY_RESULT *q_res);
+static DB_QUERY_TYPE *db_cp_query_type_helper(DB_QUERY_TYPE *src, DB_QUERY_TYPE *dest);
+static int or_packed_query_format_size(const DB_QUERY_TYPE *q, int *count);
+static char *or_pack_query_format(char *buf, const DB_QUERY_TYPE *q, const int count);
+static char *or_unpack_query_format(char *buf, DB_QUERY_TYPE **q);
 
 /*
  * allocate_query_result() - This function allocates a query_result structure
@@ -98,24 +95,24 @@ static char *or_unpack_query_format (char *buf, DB_QUERY_TYPE ** q);
  * return : DB_QUERY_RESULT pointer or NULL
  */
 static DB_QUERY_RESULT *
-allocate_query_result (void)
+allocate_query_result(void)
 {
   DB_QUERY_RESULT *q_res;
 
   q_res = Qres_table.alloc_res.free_qres_list;
   if (q_res != NULL)
-    {
-      Qres_table.alloc_res.free_qres_list = q_res->next;
-      Qres_table.alloc_res.free_qres_cnt--;
-    }
+  {
+    Qres_table.alloc_res.free_qres_list = q_res->next;
+    Qres_table.alloc_res.free_qres_cnt--;
+  }
   else
+  {
+    q_res = (DB_QUERY_RESULT *)malloc(DB_SIZEOF(DB_QUERY_RESULT));
+    if (q_res == NULL)
     {
-      q_res = (DB_QUERY_RESULT *) malloc (DB_SIZEOF (DB_QUERY_RESULT));
-      if (q_res == NULL)
-	{
-	  er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_OUT_OF_VIRTUAL_MEMORY, 1, DB_SIZEOF (DB_QUERY_RESULT));
-	}
+      er_set(ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_OUT_OF_VIRTUAL_MEMORY, 1, DB_SIZEOF(DB_QUERY_RESULT));
     }
+  }
 
   return q_res;
 }
@@ -128,18 +125,18 @@ allocate_query_result (void)
  * q_res(in): Query result structure to be freed.
  */
 static void
-free_query_result (DB_QUERY_RESULT * q_res)
+free_query_result(DB_QUERY_RESULT *q_res)
 {
   if (Qres_table.alloc_res.free_qres_cnt < Qres_table.alloc_res.max_qres_cnt)
-    {
-      q_res->next = Qres_table.alloc_res.free_qres_list;
-      Qres_table.alloc_res.free_qres_list = q_res;
-      Qres_table.alloc_res.free_qres_cnt++;
-    }
+  {
+    q_res->next = Qres_table.alloc_res.free_qres_list;
+    Qres_table.alloc_res.free_qres_list = q_res;
+    Qres_table.alloc_res.free_qres_cnt++;
+  }
   else
-    {
-      free_and_init (q_res);
-    }
+  {
+    free_and_init(q_res);
+  }
 }
 
 /*
@@ -150,38 +147,37 @@ free_query_result (DB_QUERY_RESULT * q_res)
  * note : p->domain is a pointer to a cached domain structure,
  *        and should no longer be freed.
  */
-void
-db_free_query_format (DB_QUERY_TYPE * q)
+void db_free_query_format(DB_QUERY_TYPE *q)
 {
   DB_QUERY_TYPE *p, *n;
 
   n = q;
   while (n != NULL)
+  {
+    p = n;
+    n = n->next;
+    if (p->name != NULL)
     {
-      p = n;
-      n = n->next;
-      if (p->name != NULL)
-	{
-	  free_and_init (p->name);
-	}
-      if (p->attr_name != NULL)
-	{
-	  free_and_init (p->attr_name);
-	}
-      if (p->spec_name != NULL)
-	{
-	  free_and_init (p->spec_name);
-	}
-      if (p->original_name != NULL)
-	{
-	  free_and_init (p->original_name);
-	}
-      if (p->src_domain != NULL)
-	{
-	  sm_domain_free (p->src_domain);
-	}
-      free_and_init (p);
+      free_and_init(p->name);
     }
+    if (p->attr_name != NULL)
+    {
+      free_and_init(p->attr_name);
+    }
+    if (p->spec_name != NULL)
+    {
+      free_and_init(p->spec_name);
+    }
+    if (p->original_name != NULL)
+    {
+      free_and_init(p->original_name);
+    }
+    if (p->src_domain != NULL)
+    {
+      sm_domain_free(p->src_domain);
+    }
+    free_and_init(p);
+  }
 }
 
 /*
@@ -191,7 +187,7 @@ db_free_query_format (DB_QUERY_TYPE * q)
  *    count (out): will hold the count of columns when the function returns
  */
 static int
-or_packed_query_format_size (const DB_QUERY_TYPE * columns, int *count)
+or_packed_query_format_size(const DB_QUERY_TYPE *columns, int *count)
 {
   int size = 0;
   int len = 0;
@@ -200,35 +196,35 @@ or_packed_query_format_size (const DB_QUERY_TYPE * columns, int *count)
   /* number of columns in the list */
   size = OR_INT_SIZE;
   if (columns == NULL)
-    {
-      /* only an integer containing the size (0) */
-      return size;
-    }
+  {
+    /* only an integer containing the size (0) */
+    return size;
+  }
 
   for (column = columns; column != NULL; column = column->next)
-    {
-      /* column type */
-      size += OR_INT_SIZE;
-      /* column name */
-      size += or_packed_string_length (column->name, &len);
-      /* attribute name */
-      size += or_packed_string_length (column->attr_name, &len);
-      /* spec name */
-      size += or_packed_string_length (column->spec_name, &len);
-      /* user specified column name */
-      size += or_packed_string_length (column->original_name, &len);
-      /* column data type */
-      size += OR_INT_SIZE;
-      /* column data size */
-      size += OR_INT_SIZE;
-      /* column domain information */
-      size += or_packed_domain_size (column->domain, true);
-      /* column source domain information */
-      size += or_packed_domain_size (column->src_domain, true);
-      /* column user visible */
-      size += OR_INT_SIZE;
-      columns_cnt++;
-    }
+  {
+    /* column type */
+    size += OR_INT_SIZE;
+    /* column name */
+    size += or_packed_string_length(column->name, &len);
+    /* attribute name */
+    size += or_packed_string_length(column->attr_name, &len);
+    /* spec name */
+    size += or_packed_string_length(column->spec_name, &len);
+    /* user specified column name */
+    size += or_packed_string_length(column->original_name, &len);
+    /* column data type */
+    size += OR_INT_SIZE;
+    /* column data size */
+    size += OR_INT_SIZE;
+    /* column domain information */
+    size += or_packed_domain_size(column->domain, true);
+    /* column source domain information */
+    size += or_packed_domain_size(column->src_domain, true);
+    /* column user visible */
+    size += OR_INT_SIZE;
+    columns_cnt++;
+  }
   *count = columns_cnt;
   return size;
 }
@@ -241,54 +237,54 @@ or_packed_query_format_size (const DB_QUERY_TYPE * columns, int *count)
  *    count (in)  : the count of query format contained in the list
  */
 static char *
-or_pack_query_format (char *buf, const DB_QUERY_TYPE * columns, const int count)
+or_pack_query_format(char *buf, const DB_QUERY_TYPE *columns, const int count)
 {
   char *ptr = NULL;
   int len = 0;
   const DB_QUERY_TYPE *column;
 
   if (count != 0)
-    {
-      /* sanity check */
-      assert (columns != NULL);
-    }
+  {
+    /* sanity check */
+    assert(columns != NULL);
+  }
   /* pack the number of columns */
-  ptr = or_pack_int (buf, count);
+  ptr = or_pack_int(buf, count);
   if (count == 0)
-    {
-      return ptr;
-    }
+  {
+    return ptr;
+  }
 
   for (column = columns; column != NULL; column = column->next)
-    {
-      /* column type */
-      ptr = or_pack_int (ptr, (int) column->col_type);
-      /* column name */
-      len = (column->name == NULL) ? 0 : (int) strlen (column->name);
-      ptr = or_pack_string_with_length (ptr, column->name, len);
+  {
+    /* column type */
+    ptr = or_pack_int(ptr, (int)column->col_type);
+    /* column name */
+    len = (column->name == NULL) ? 0 : (int)strlen(column->name);
+    ptr = or_pack_string_with_length(ptr, column->name, len);
 
-      /* attribute name */
-      len = (column->attr_name == NULL) ? 0 : (int) strlen (column->attr_name);
-      ptr = or_pack_string_with_length (ptr, column->attr_name, len);
+    /* attribute name */
+    len = (column->attr_name == NULL) ? 0 : (int)strlen(column->attr_name);
+    ptr = or_pack_string_with_length(ptr, column->attr_name, len);
 
-      /* spec name */
-      len = (column->spec_name == NULL) ? 0 : (int) strlen (column->spec_name);
-      ptr = or_pack_string_with_length (ptr, column->spec_name, len);
+    /* spec name */
+    len = (column->spec_name == NULL) ? 0 : (int)strlen(column->spec_name);
+    ptr = or_pack_string_with_length(ptr, column->spec_name, len);
 
-      /* user specified column name */
-      len = (column->original_name == NULL) ? 0 : (int) strlen (column->original_name);
-      ptr = or_pack_string_with_length (ptr, column->original_name, len);
-      /* column data type */
-      ptr = or_pack_int (ptr, column->db_type);
-      /* column data size */
-      ptr = or_pack_int (ptr, column->size);
-      /* column domain information */
-      ptr = or_pack_domain (ptr, column->domain, 1, 1);
-      /* column source domain information */
-      ptr = or_pack_domain (ptr, column->src_domain, 1, 1);
-      /* column user visible */
-      ptr = or_pack_int (ptr, column->visible_type);
-    }
+    /* user specified column name */
+    len = (column->original_name == NULL) ? 0 : (int)strlen(column->original_name);
+    ptr = or_pack_string_with_length(ptr, column->original_name, len);
+    /* column data type */
+    ptr = or_pack_int(ptr, column->db_type);
+    /* column data size */
+    ptr = or_pack_int(ptr, column->size);
+    /* column domain information */
+    ptr = or_pack_domain(ptr, column->domain, 1, 1);
+    /* column source domain information */
+    ptr = or_pack_domain(ptr, column->src_domain, 1, 1);
+    /* column user visible */
+    ptr = or_pack_int(ptr, column->visible_type);
+  }
 
   return ptr;
 }
@@ -305,112 +301,110 @@ or_pack_query_format (char *buf, const DB_QUERY_TYPE * columns, const int count)
  * thread and needs to be released using free_and_init.
  */
 static char *
-or_unpack_query_format (char *buf, DB_QUERY_TYPE ** columns)
+or_unpack_query_format(char *buf, DB_QUERY_TYPE **columns)
 {
   char *ptr = NULL;
   int size = 0, i = 0;
   DB_QUERY_TYPE *head = NULL, *current = NULL;
   TP_DOMAIN *tp_dom = NULL;
-  ptr = or_unpack_int (buf, &size);
+  ptr = or_unpack_int(buf, &size);
   for (i = 0; i < size; i++)
+  {
+    int tmp = 0;
+    DB_QUERY_TYPE *column = (DB_QUERY_TYPE *)malloc(sizeof(DB_QUERY_TYPE));
+
+    if (column == NULL)
     {
-      int tmp = 0;
-      DB_QUERY_TYPE *column = (DB_QUERY_TYPE *) malloc (sizeof (DB_QUERY_TYPE));
-
-      if (column == NULL)
-	{
-	  er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_OUT_OF_VIRTUAL_MEMORY, 1, sizeof (DB_QUERY_TYPE));
-	  goto error_cleanup;
-	}
-      /* column type */
-      ptr = or_unpack_int (ptr, &tmp);
-      column->col_type = (DB_COL_TYPE) tmp;
-      /* column name */
-      ptr = or_unpack_string_alloc (ptr, &(column->name));
-      /* attribute name */
-      ptr = or_unpack_string_alloc (ptr, &(column->attr_name));
-      /* spec name */
-      ptr = or_unpack_string_alloc (ptr, &(column->spec_name));
-      /* user specified column name */
-      ptr = or_unpack_string_alloc (ptr, &(column->original_name));
-      /* column data type */
-      ptr = or_unpack_int (ptr, &tmp);
-      column->db_type = (DB_TYPE) tmp;
-      /* column data size */
-      ptr = or_unpack_int (ptr, &(column->size));
-      /* column domain information */
-      ptr = or_unpack_domain (ptr, &tp_dom, NULL);
-      if (tp_dom != NULL)
-	{
-	  column->domain = tp_domain_cache (tp_dom);
-	}
-      else
-	{
-	  column->domain = NULL;
-	}
-      tp_domain_free (tp_dom);
-      tp_dom = NULL;
-      /* column source domain */
-      ptr = or_unpack_domain (ptr, &tp_dom, NULL);
-      if (tp_dom != NULL)
-	{
-	  column->src_domain = sm_domain_copy (tp_dom);
-	}
-      else
-	{
-	  column->src_domain = NULL;
-	}
-      tp_domain_free (tp_dom);
-      /* column user visible */
-      ptr = or_unpack_int (ptr, &tmp);
-      column->visible_type = (COL_VISIBLE_TYPE) tmp;
-
-      column->next = NULL;
-
-      if (head == NULL)
-	{
-	  head = column;
-	  current = head;
-	}
-      else
-	{
-	  current->next = column;
-	  current = current->next;
-	}
+      er_set(ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_OUT_OF_VIRTUAL_MEMORY, 1, sizeof(DB_QUERY_TYPE));
+      goto error_cleanup;
     }
+    /* column type */
+    ptr = or_unpack_int(ptr, &tmp);
+    column->col_type = (DB_COL_TYPE)tmp;
+    /* column name */
+    ptr = or_unpack_string_alloc(ptr, &(column->name));
+    /* attribute name */
+    ptr = or_unpack_string_alloc(ptr, &(column->attr_name));
+    /* spec name */
+    ptr = or_unpack_string_alloc(ptr, &(column->spec_name));
+    /* user specified column name */
+    ptr = or_unpack_string_alloc(ptr, &(column->original_name));
+    /* column data type */
+    ptr = or_unpack_int(ptr, &tmp);
+    column->db_type = (DB_TYPE)tmp;
+    /* column data size */
+    ptr = or_unpack_int(ptr, &(column->size));
+    /* column domain information */
+    ptr = or_unpack_domain(ptr, &tp_dom, NULL);
+    if (tp_dom != NULL)
+    {
+      column->domain = tp_domain_cache(tp_dom);
+    }
+    else
+    {
+      column->domain = NULL;
+    }
+    tp_domain_free(tp_dom);
+    tp_dom = NULL;
+    /* column source domain */
+    ptr = or_unpack_domain(ptr, &tp_dom, NULL);
+    if (tp_dom != NULL)
+    {
+      column->src_domain = sm_domain_copy(tp_dom);
+    }
+    else
+    {
+      column->src_domain = NULL;
+    }
+    tp_domain_free(tp_dom);
+    /* column user visible */
+    ptr = or_unpack_int(ptr, &tmp);
+    column->visible_type = (COL_VISIBLE_TYPE)tmp;
+
+    column->next = NULL;
+
+    if (head == NULL)
+    {
+      head = column;
+      current = head;
+    }
+    else
+    {
+      current->next = column;
+      current = current->next;
+    }
+  }
 
   *columns = head;
   return ptr;
 
 error_cleanup:
   while (head != NULL)
-    {
-      current = head;
-      head = head->next;
+  {
+    current = head;
+    head = head->next;
 
-      /* free name */
-      free_and_init (current->name);
-      /* free attribute name */
-      free_and_init (current->attr_name);
-      /* free spec name */
-      free_and_init (current->spec_name);
-      /* free user specified column name */
-      free_and_init (current->original_name);
-      free_and_init (current);
-    }
+    /* free name */
+    free_and_init(current->name);
+    /* free attribute name */
+    free_and_init(current->attr_name);
+    /* free spec name */
+    free_and_init(current->spec_name);
+    /* free user specified column name */
+    free_and_init(current->original_name);
+    free_and_init(current);
+  }
   return ptr;
 }
-
 
 /*
  * db_init_prepare_info () - initialize a prepare info object
  * return	: void
  * info (in/out): prepare info
  */
-void
-db_init_prepare_info (DB_PREPARE_INFO * info)
+void db_init_prepare_info(DB_PREPARE_INFO *info)
 {
-  assert (info != NULL);
+  assert(info != NULL);
   info->statement = NULL;
   info->columns = NULL;
   info->host_variables.size = 0;
@@ -433,39 +427,38 @@ db_init_prepare_info (DB_PREPARE_INFO * info)
  * info (in) : prepared info
  * buffer (out) : buffer to pack to
  */
-int
-db_pack_prepare_info (const DB_PREPARE_INFO * info, char **buffer)
+int db_pack_prepare_info(const DB_PREPARE_INFO *info, char **buffer)
 {
   char *ptr = NULL;
   int packed_size = 0, i = 0;
   int query_len = 0, columns_cnt = 0;
 
-  assert (*buffer == NULL);
-  assert (info != NULL);
+  assert(*buffer == NULL);
+  assert(info != NULL);
 
   /* calculate packed size */
   /* parameters */
   packed_size += OR_INT_SIZE;
   if (info->host_variables.size != 0)
+  {
+    int size = 0, i = 0;
+    for (i = 0; i < info->host_variables.size; i++)
     {
-      int size = 0, i = 0;
-      for (i = 0; i < info->host_variables.size; i++)
-	{
-	  size += OR_VALUE_ALIGNED_SIZE (&(info->host_variables.vals[i]));
-	}
-      packed_size += size;
-
-      size = 0;
-      for (i = 0; i < info->host_variables.size - info->auto_param_count; i++)
-	{
-	  size += or_packed_domain_size (info->host_var_expected_domains[i], 0);
-	}
-      packed_size += size;
+      size += OR_VALUE_ALIGNED_SIZE(&(info->host_variables.vals[i]));
     }
+    packed_size += size;
+
+    size = 0;
+    for (i = 0; i < info->host_variables.size - info->auto_param_count; i++)
+    {
+      size += or_packed_domain_size(info->host_var_expected_domains[i], 0);
+    }
+    packed_size += size;
+  }
   /* calculate size for columns */
-  packed_size += or_packed_query_format_size (info->columns, &columns_cnt);
+  packed_size += or_packed_query_format_size(info->columns, &columns_cnt);
   /* packed size for query */
-  packed_size += or_packed_string_length (info->statement, &query_len);
+  packed_size += or_packed_string_length(info->statement, &query_len);
   /* statement type */
   packed_size += OR_INT_SIZE;
   /* auto parameters count */
@@ -480,86 +473,86 @@ db_pack_prepare_info (const DB_PREPARE_INFO * info, char **buffer)
   packed_size += OR_INT_SIZE;
   /* into list names */
   for (i = 0; i < info->into_count; i++)
-    {
-      packed_size += or_packed_string_length (info->into_list[i], NULL);
-    }
+  {
+    packed_size += or_packed_string_length(info->into_list[i], NULL);
+  }
 
   /* subquery_num */
   packed_size += OR_INT_SIZE;
   if (info->subquery_num > 0)
+  {
+    /* subquery's xasl_id */
+    packed_size += OR_XASL_ID_SIZE * info->subquery_num;
+    /* subquery's host_var_count */
+    packed_size += OR_INT_SIZE * info->subquery_num;
+    for (i = 0; i < info->subquery_num; i++)
     {
-      /* subquery's xasl_id */
-      packed_size += OR_XASL_ID_SIZE * info->subquery_num;
-      /* subquery's host_var_count */
-      packed_size += OR_INT_SIZE * info->subquery_num;
-      for (i = 0; i < info->subquery_num; i++)
-	{
-	  /* subquery's host_var_index */
-	  packed_size += OR_INT_SIZE * info->subquery_info[i].host_var_count;
-	}
+      /* subquery's host_var_index */
+      packed_size += OR_INT_SIZE * info->subquery_info[i].host_var_count;
     }
+  }
 
-  ptr = (char *) malloc (packed_size);
+  ptr = (char *)malloc(packed_size);
   if (ptr == NULL)
-    {
-      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_OUT_OF_VIRTUAL_MEMORY, 1, (size_t) packed_size);
-      return ER_FAILED;
-    }
+  {
+    er_set(ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_OUT_OF_VIRTUAL_MEMORY, 1, (size_t)packed_size);
+    return ER_FAILED;
+  }
   *buffer = ptr;
 
   /* begin packing */
   /* columns */
-  ptr = or_pack_query_format (ptr, info->columns, columns_cnt);
+  ptr = or_pack_query_format(ptr, info->columns, columns_cnt);
   /* query */
-  ptr = or_pack_string_with_length (ptr, info->statement, query_len);
+  ptr = or_pack_string_with_length(ptr, info->statement, query_len);
   /* statement type */
-  ptr = or_pack_int (ptr, info->stmt_type);
+  ptr = or_pack_int(ptr, info->stmt_type);
   /* auto parameters count */
-  ptr = or_pack_int (ptr, info->auto_param_count);
+  ptr = or_pack_int(ptr, info->auto_param_count);
   /* recompile */
-  ptr = or_pack_int (ptr, info->recompile);
+  ptr = or_pack_int(ptr, info->recompile);
   /* do_cache */
-  ptr = or_pack_int (ptr, info->do_cache);
+  ptr = or_pack_int(ptr, info->do_cache);
   /* oids included */
-  ptr = or_pack_int (ptr, info->oids_included);
+  ptr = or_pack_int(ptr, info->oids_included);
   /* into list length */
-  ptr = or_pack_int (ptr, info->into_count);
+  ptr = or_pack_int(ptr, info->into_count);
   for (i = 0; i < info->into_count; i++)
-    {
-      ptr = or_pack_string (ptr, info->into_list[i]);
-    }
+  {
+    ptr = or_pack_string(ptr, info->into_list[i]);
+  }
   /* parameters */
   if (info->host_variables.size == 0)
-    {
-      ptr = or_pack_int (ptr, 0);
-    }
+  {
+    ptr = or_pack_int(ptr, 0);
+  }
   else
+  {
+    int i = 0;
+    ptr = or_pack_int(ptr, info->host_variables.size);
+    for (i = 0; i < info->host_variables.size; i++)
     {
-      int i = 0;
-      ptr = or_pack_int (ptr, info->host_variables.size);
-      for (i = 0; i < info->host_variables.size; i++)
-	{
-	  ptr = or_pack_db_value (ptr, &(info->host_variables.vals[i]));
-	}
-      for (i = 0; i < info->host_variables.size - info->auto_param_count; i++)
-	{
-	  ptr = or_pack_domain (ptr, info->host_var_expected_domains[i], 0, 0);
-	}
+      ptr = or_pack_db_value(ptr, &(info->host_variables.vals[i]));
     }
+    for (i = 0; i < info->host_variables.size - info->auto_param_count; i++)
+    {
+      ptr = or_pack_domain(ptr, info->host_var_expected_domains[i], 0, 0);
+    }
+  }
 
   /* subquery */
-  ptr = or_pack_int (ptr, info->subquery_num);
+  ptr = or_pack_int(ptr, info->subquery_num);
   for (i = 0; i < info->subquery_num; i++)
-    {
-      int k;
+  {
+    int k;
 
-      OR_PACK_XASL_ID (ptr, &(info->subquery_info[i].xasl_id));
-      ptr = or_pack_int (ptr, info->subquery_info[i].host_var_count);
-      for (k = 0; k < info->subquery_info[i].host_var_count; k++)
-	{
-	  ptr = or_pack_int (ptr, info->subquery_info[i].host_var_index[k]);
-	}
+    OR_PACK_XASL_ID(ptr, &(info->subquery_info[i].xasl_id));
+    ptr = or_pack_int(ptr, info->subquery_info[i].host_var_count);
+    for (k = 0; k < info->subquery_info[i].host_var_count; k++)
+    {
+      ptr = or_pack_int(ptr, info->subquery_info[i].host_var_index[k]);
     }
+  }
 
   return packed_size;
 }
@@ -570,212 +563,210 @@ db_pack_prepare_info (const DB_PREPARE_INFO * info, char **buffer)
  * info (out) : DB_PREPARE_INFO object
  * buffer (in): serialized form of the DB_PREPARE_INFO object
  */
-int
-db_unpack_prepare_info (DB_PREPARE_INFO * info, char *buffer)
+int db_unpack_prepare_info(DB_PREPARE_INFO *info, char *buffer)
 {
   int i, q, subquery_num;
   char *ptr = NULL;
 
-  assert (info != NULL);
-  assert (buffer != NULL);
+  assert(info != NULL);
+  assert(buffer != NULL);
 
   /* unpack column info */
-  ptr = or_unpack_query_format (buffer, &info->columns);
+  ptr = or_unpack_query_format(buffer, &info->columns);
   /* unpack query */
-  ptr = or_unpack_string_alloc (ptr, &info->statement);
+  ptr = or_unpack_string_alloc(ptr, &info->statement);
   /* unpack statement type */
-  ptr = or_unpack_int (ptr, (int *) &info->stmt_type);
+  ptr = or_unpack_int(ptr, (int *)&info->stmt_type);
   /* unpack auto parameters count */
-  ptr = or_unpack_int (ptr, &info->auto_param_count);
+  ptr = or_unpack_int(ptr, &info->auto_param_count);
   /* unpack recompile */
-  ptr = or_unpack_int (ptr, &info->recompile);
+  ptr = or_unpack_int(ptr, &info->recompile);
   /* unpack do_cache */
-  ptr = or_unpack_int (ptr, &info->do_cache);
+  ptr = or_unpack_int(ptr, &info->do_cache);
   /* oids included */
-  ptr = or_unpack_int (ptr, &info->oids_included);
+  ptr = or_unpack_int(ptr, &info->oids_included);
   /* unpack into list length */
-  ptr = or_unpack_int (ptr, &info->into_count);
+  ptr = or_unpack_int(ptr, &info->into_count);
   if (info->into_count > 0)
+  {
+    info->into_list = (char **)malloc(info->into_count * sizeof(char *));
+    if (info->into_list == NULL)
     {
-      info->into_list = (char **) malloc (info->into_count * sizeof (char *));
-      if (info->into_list == NULL)
-	{
-	  er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_OUT_OF_VIRTUAL_MEMORY, 1, info->into_count * sizeof (char *));
-	  goto error;
-	}
-      for (i = 0; i < info->into_count; i++)
-	{
-	  ptr = or_unpack_string_alloc (ptr, &info->into_list[i]);
-	}
+      er_set(ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_OUT_OF_VIRTUAL_MEMORY, 1, info->into_count * sizeof(char *));
+      goto error;
     }
+    for (i = 0; i < info->into_count; i++)
+    {
+      ptr = or_unpack_string_alloc(ptr, &info->into_list[i]);
+    }
+  }
   /* unpack parameters */
-  ptr = or_unpack_int (ptr, &(info->host_variables.size));
+  ptr = or_unpack_int(ptr, &(info->host_variables.size));
   if (info->host_variables.size > 0)
+  {
+    unsigned int i = 0, var_count;
+
+    var_count = info->host_variables.size;
+    info->host_variables.vals = (DB_VALUE *)malloc(var_count * sizeof(DB_VALUE));
+    if (info->host_variables.vals == NULL)
     {
-      unsigned int i = 0, var_count;
-
-      var_count = info->host_variables.size;
-      info->host_variables.vals = (DB_VALUE *) malloc (var_count * sizeof (DB_VALUE));
-      if (info->host_variables.vals == NULL)
-	{
-	  er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_OUT_OF_VIRTUAL_MEMORY, 1,
-		  info->host_variables.size * sizeof (DB_VALUE));
-	  goto error;
-	}
-      for (i = 0; i < var_count; i++)
-	{
-	  ptr = or_unpack_db_value (ptr, &(info->host_variables.vals[i]));
-	}
-
-      var_count = info->host_variables.size - info->auto_param_count;
-      info->host_var_expected_domains = (TP_DOMAIN **) malloc (var_count * sizeof (TP_DOMAIN *));
-      if (info->host_var_expected_domains == NULL)
-	{
-	  er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_OUT_OF_VIRTUAL_MEMORY, 1, var_count * sizeof (TP_DOMAIN *));
-	  goto error;
-	}
-      for (i = 0; i < var_count; i++)
-	{
-	  ptr = or_unpack_domain (ptr, &info->host_var_expected_domains[i], NULL);
-	}
+      er_set(ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_OUT_OF_VIRTUAL_MEMORY, 1,
+             info->host_variables.size * sizeof(DB_VALUE));
+      goto error;
     }
+    for (i = 0; i < var_count; i++)
+    {
+      ptr = or_unpack_db_value(ptr, &(info->host_variables.vals[i]));
+    }
+
+    var_count = info->host_variables.size - info->auto_param_count;
+    info->host_var_expected_domains = (TP_DOMAIN **)malloc(var_count * sizeof(TP_DOMAIN *));
+    if (info->host_var_expected_domains == NULL)
+    {
+      er_set(ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_OUT_OF_VIRTUAL_MEMORY, 1, var_count * sizeof(TP_DOMAIN *));
+      goto error;
+    }
+    for (i = 0; i < var_count; i++)
+    {
+      ptr = or_unpack_domain(ptr, &info->host_var_expected_domains[i], NULL);
+    }
+  }
 
   /* subquery */
-  ptr = or_unpack_int (ptr, &info->subquery_num);
+  ptr = or_unpack_int(ptr, &info->subquery_num);
   subquery_num = info->subquery_num;
 
   if (subquery_num > 0)
+  {
+    info->subquery_info = (DB_PREPARE_SUBQUERY_INFO *)calloc(subquery_num, sizeof(DB_PREPARE_SUBQUERY_INFO));
+    if (info->subquery_info == NULL)
     {
-      info->subquery_info = (DB_PREPARE_SUBQUERY_INFO *) calloc (subquery_num, sizeof (DB_PREPARE_SUBQUERY_INFO));
-      if (info->subquery_info == NULL)
-	{
-	  er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_OUT_OF_VIRTUAL_MEMORY, 1,
-		  subquery_num * sizeof (DB_PREPARE_SUBQUERY_INFO));
-	  goto error;
-	}
-      for (q = 0; q < subquery_num; q++)
-	{
-	  OR_UNPACK_XASL_ID (ptr, &info->subquery_info[q].xasl_id);
-	  ptr = or_unpack_int (ptr, &info->subquery_info[q].host_var_count);
-	  if (info->subquery_info[q].host_var_count > 0)
-	    {
-	      info->subquery_info[q].host_var_index =
-		(int *) malloc (info->subquery_info[q].host_var_count * sizeof (int));
-	      if (info->subquery_info[q].host_var_index == NULL)
-		{
-		  er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_OUT_OF_VIRTUAL_MEMORY, 1,
-			  info->subquery_info[q].host_var_count * sizeof (int));
-		  goto error;
-		}
-	      for (i = 0; i < info->subquery_info[q].host_var_count; i++)
-		{
-		  ptr = or_unpack_int (ptr, &info->subquery_info[q].host_var_index[i]);
-		}
-	    }
-	}
+      er_set(ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_OUT_OF_VIRTUAL_MEMORY, 1,
+             subquery_num * sizeof(DB_PREPARE_SUBQUERY_INFO));
+      goto error;
     }
+    for (q = 0; q < subquery_num; q++)
+    {
+      OR_UNPACK_XASL_ID(ptr, &info->subquery_info[q].xasl_id);
+      ptr = or_unpack_int(ptr, &info->subquery_info[q].host_var_count);
+      if (info->subquery_info[q].host_var_count > 0)
+      {
+        info->subquery_info[q].host_var_index =
+            (int *)malloc(info->subquery_info[q].host_var_count * sizeof(int));
+        if (info->subquery_info[q].host_var_index == NULL)
+        {
+          er_set(ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_OUT_OF_VIRTUAL_MEMORY, 1,
+                 info->subquery_info[q].host_var_count * sizeof(int));
+          goto error;
+        }
+        for (i = 0; i < info->subquery_info[q].host_var_count; i++)
+        {
+          ptr = or_unpack_int(ptr, &info->subquery_info[q].host_var_index[i]);
+        }
+      }
+    }
+  }
 
   return NO_ERROR;
 
 error:
   if (info->statement != NULL)
-    {
-      free_and_init (info->statement);
-    }
+  {
+    free_and_init(info->statement);
+  }
   if (info->columns != NULL)
+  {
+    DB_QUERY_TYPE *col = info->columns;
+    DB_QUERY_TYPE *next_p = NULL;
+    while (col != NULL)
     {
-      DB_QUERY_TYPE *col = info->columns;
-      DB_QUERY_TYPE *next_p = NULL;
-      while (col != NULL)
-	{
-	  next_p = col->next;
-	  if (col->name != NULL)
-	    {
-	      free_and_init (col->name);
-	    }
-	  if (col->attr_name != NULL)
-	    {
-	      free_and_init (col->attr_name);
-	    }
-	  if (col->spec_name != NULL)
-	    {
-	      free_and_init (col->spec_name);
-	    }
-	  if (col->original_name != NULL)
-	    {
-	      free_and_init (col->original_name);
-	    }
-	  tp_domain_free (col->domain);
-	  tp_domain_free (col->src_domain);
+      next_p = col->next;
+      if (col->name != NULL)
+      {
+        free_and_init(col->name);
+      }
+      if (col->attr_name != NULL)
+      {
+        free_and_init(col->attr_name);
+      }
+      if (col->spec_name != NULL)
+      {
+        free_and_init(col->spec_name);
+      }
+      if (col->original_name != NULL)
+      {
+        free_and_init(col->original_name);
+      }
+      tp_domain_free(col->domain);
+      tp_domain_free(col->src_domain);
 
-	  free_and_init (col);
-	  col = next_p;
-	}
+      free_and_init(col);
+      col = next_p;
     }
+  }
 
   if (info->host_variables.vals != NULL)
-    {
-      db_value_clear_array (&info->host_variables);
-      free_and_init (info->host_variables.vals);
-    }
+  {
+    db_value_clear_array(&info->host_variables);
+    free_and_init(info->host_variables.vals);
+  }
   if (info->host_var_expected_domains)
-    {
-      free_and_init (info->host_var_expected_domains);
-    }
+  {
+    free_and_init(info->host_var_expected_domains);
+  }
   if (info->into_list != NULL)
+  {
+    for (i = 0; i < info->into_count; i++)
     {
-      for (i = 0; i < info->into_count; i++)
-	{
-	  if (info->into_list[i] != NULL)
-	    {
-	      free_and_init (info->into_list[i]);
-	    }
-	}
-      free_and_init (info->into_list);
+      if (info->into_list[i] != NULL)
+      {
+        free_and_init(info->into_list[i]);
+      }
     }
+    free_and_init(info->into_list);
+  }
 
   /* subquery */
   if (info->subquery_info != NULL)
+  {
+    for (i = 0; i < q; i++)
     {
-      for (i = 0; i < q; i++)
-	{
-	  if (info->subquery_info[i].host_var_index != NULL)
-	    {
-	      free_and_init (info->subquery_info[i].host_var_index);
-	    }
-	}
-      free_and_init (info->subquery_info);
+      if (info->subquery_info[i].host_var_index != NULL)
+      {
+        free_and_init(info->subquery_info[i].host_var_index);
+      }
     }
+    free_and_init(info->subquery_info);
+  }
 
   return ER_FAILED;
 }
 
-#if defined(WINDOWS) || defined (ENABLE_UNUSED_FUNCTION)
+#if defined(WINDOWS) || defined(ENABLE_UNUSED_FUNCTION)
 /*
  * db_free_colname_list() - This function frees the column name list.
  * return : void
  * colname_list(in): list of column names
  * cnt(in): number of names
  */
-void
-db_free_colname_list (char **colname_list, int cnt)
+void db_free_colname_list(char **colname_list, int cnt)
 {
   int i;
 
   if (colname_list == NULL)
-    {
-      return;
-    }
+  {
+    return;
+  }
 
   for (i = 0; i < cnt; i++)
+  {
+    if (colname_list[i] != NULL)
     {
-      if (colname_list[i] != NULL)
-	{
-	  free_and_init (colname_list[i]);
-	}
+      free_and_init(colname_list[i]);
     }
+  }
 
-  free_and_init (colname_list);
+  free_and_init(colname_list);
 }
 
 /*
@@ -784,25 +775,24 @@ db_free_colname_list (char **colname_list, int cnt)
  * domain_list(in): List of domain pointers
  * cnt(in): Number of domain pointers
  */
-void
-db_free_domain_list (SM_DOMAIN ** domain_list, int cnt)
+void db_free_domain_list(SM_DOMAIN **domain_list, int cnt)
 {
   int i;
 
   if (domain_list == NULL)
-    {
-      return;
-    }
+  {
+    return;
+  }
 
   for (i = 0; i < cnt; i++)
+  {
+    if (domain_list[i] != NULL)
     {
-      if (domain_list[i] != NULL)
-	{
-	  sm_domain_free (domain_list[i]);
-	}
+      sm_domain_free(domain_list[i]);
     }
+  }
 
-  free_and_init (domain_list);
+  free_and_init(domain_list);
 }
 #endif
 
@@ -813,77 +803,77 @@ db_free_domain_list (SM_DOMAIN ** domain_list, int cnt)
  * return : void
  * r(in): Query Result Structure pointer
  */
-void
-db_free_query_result (DB_QUERY_RESULT * r)
+void db_free_query_result(DB_QUERY_RESULT *r)
 {
   DB_VALUE **valp;
   int k;
-#if defined (ENABLE_UNUSED_FUNCTION)
+#if defined(ENABLE_UNUSED_FUNCTION)
   DB_VALUE *val;
 #endif
 
   if (r == NULL)
-    {
-      return;
-    }
+  {
+    return;
+  }
 
   /* disconnect query result from the query table */
 #if defined(QP_DEBUG)
   if (Qres_table.qres_list[r->qtable_ind] != r)
-    {
-      (void) fprintf (stdout, "*WARNING*: Misconnection between the query" "result structure and query table.\n");
-      return;
-    }
+  {
+    (void)fprintf(stdout, "*WARNING*: Misconnection between the query"
+                          "result structure and query table.\n");
+    return;
+  }
 #endif
 
-  Qres_table.qres_list[r->qtable_ind] = (DB_QUERY_RESULT *) NULL;
+  Qres_table.qres_list[r->qtable_ind] = (DB_QUERY_RESULT *)NULL;
   Qres_table.qres_cnt--;
   if (r->status == T_CLOSED && Qres_table.qres_closed_cnt > 0)
-    {
-      Qres_table.qres_closed_cnt--;
-    }
+  {
+    Qres_table.qres_closed_cnt--;
+  }
 
   /* free type list */
-  db_free_query_format (r->query_type);
+  db_free_query_format(r->query_type);
   r->query_type = NULL;
 
   switch (r->type)
+  {
+  case T_SELECT:
+    break;
+
+  case T_CALL:
+    db_value_free(r->res.c.val_ptr);
+    break;
+
+  case T_OBJFETCH:
+  {
+    for (k = 0, valp = r->res.o.valptr_list; k < r->col_cnt; k++, valp++)
     {
-    case T_SELECT:
-      break;
-
-    case T_CALL:
-      db_value_free (r->res.c.val_ptr);
-      break;
-
-    case T_OBJFETCH:
-      {
-	for (k = 0, valp = r->res.o.valptr_list; k < r->col_cnt; k++, valp++)
-	  {
-	    db_value_free (*valp);
-	  }
-	free_and_init (r->res.o.valptr_list);
-      }
-      break;
-
-#if defined (ENABLE_UNUSED_FUNCTION)
-    case T_GET:
-      {
-	for (k = 0, val = r->res.g.tpl_list; k < (r->res.g.n_tuple * r->col_cnt); k++, val++)
-	  {
-	    db_value_clear (val);
-	  }
-	free_and_init (r->res.g.tpl_list);
-      }
-      break;
-#endif
-    default:
-      break;
+      db_value_free(*valp);
     }
+    free_and_init(r->res.o.valptr_list);
+  }
+  break;
+
+#if defined(ENABLE_UNUSED_FUNCTION)
+  case T_GET:
+  {
+    for (k = 0, val = r->res.g.tpl_list; k < (r->res.g.n_tuple * r->col_cnt); k++, val++)
+    {
+      db_value_clear(val);
+    }
+    free_and_init(r->res.g.tpl_list);
+  }
+  break;
+#endif
+  default:
+    break;
+  }
 
   r->status = T_CLOSED;
 
-  free_query_result (r);
+  free_query_result(r);
 }
 
 /*
@@ -894,55 +884,55 @@ db_free_query_result (DB_QUERY_RESULT * r)
  * cnt(in): number of nodes in the type list
  */
 DB_QUERY_TYPE *
-db_alloc_query_format (int cnt)
+db_alloc_query_format(int cnt)
 {
   DB_QUERY_TYPE *p, *q;
   int k;
 
   if (cnt == 0)
-    {
-      return NULL;
-    }
+  {
+    return NULL;
+  }
 
-  q = (DB_QUERY_TYPE *) malloc (DB_SIZEOF (DB_QUERY_TYPE));
+  q = (DB_QUERY_TYPE *)malloc(DB_SIZEOF(DB_QUERY_TYPE));
   if (q == NULL)
-    {
-      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_OUT_OF_VIRTUAL_MEMORY, 1, DB_SIZEOF (DB_QUERY_TYPE));
-      return NULL;
-    }
+  {
+    er_set(ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_OUT_OF_VIRTUAL_MEMORY, 1, DB_SIZEOF(DB_QUERY_TYPE));
+    return NULL;
+  }
   /* initialize */
   q->db_type = DB_TYPE_NULL;
   q->size = 0;
-  q->name = (char *) NULL;
-  q->attr_name = (char *) NULL;
-  q->spec_name = (char *) NULL;
-  q->original_name = (char *) NULL;
-  q->domain = (SM_DOMAIN *) NULL;
-  q->src_domain = (SM_DOMAIN *) NULL;
+  q->name = (char *)NULL;
+  q->attr_name = (char *)NULL;
+  q->spec_name = (char *)NULL;
+  q->original_name = (char *)NULL;
+  q->domain = (SM_DOMAIN *)NULL;
+  q->src_domain = (SM_DOMAIN *)NULL;
   q->visible_type = USER_COLUMN;
   q->col_type = DB_COL_OTHER;
 
   for (k = 0, p = q, p->next = NULL; k < cnt - 1; k++, p = p->next, p->next = NULL)
+  {
+    p->next = (DB_QUERY_TYPE *)malloc(DB_SIZEOF(DB_QUERY_TYPE));
+    if (p->next == NULL)
     {
-      p->next = (DB_QUERY_TYPE *) malloc (DB_SIZEOF (DB_QUERY_TYPE));
-      if (p->next == NULL)
-	{
-	  er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_OUT_OF_VIRTUAL_MEMORY, 1, DB_SIZEOF (DB_QUERY_TYPE));
-	  db_free_query_format (q);
-	  return NULL;
-	}
-      /* initialize */
-      p->next->db_type = DB_TYPE_NULL;
-      p->next->size = 0;
-      p->next->name = (char *) NULL;
-      p->next->attr_name = (char *) NULL;
-      p->next->spec_name = (char *) NULL;
-      p->next->original_name = (char *) NULL;
-      p->next->domain = (SM_DOMAIN *) NULL;
-      p->next->src_domain = (SM_DOMAIN *) NULL;
-      p->next->visible_type = USER_COLUMN;
-      p->next->col_type = DB_COL_OTHER;
+      er_set(ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_OUT_OF_VIRTUAL_MEMORY, 1, DB_SIZEOF(DB_QUERY_TYPE));
+      db_free_query_format(q);
+      return NULL;
     }
+    /* initialize */
+    p->next->db_type = DB_TYPE_NULL;
+    p->next->size = 0;
+    p->next->name = (char *)NULL;
+    p->next->attr_name = (char *)NULL;
+    p->next->spec_name = (char *)NULL;
+    p->next->original_name = (char *)NULL;
+    p->next->domain = (SM_DOMAIN *)NULL;
+    p->next->src_domain = (SM_DOMAIN *)NULL;
+    p->next->visible_type = USER_COLUMN;
+    p->next->col_type = DB_COL_OTHER;
+  }
 
   return q;
 }
@@ -955,75 +945,75 @@ db_alloc_query_format (int cnt)
  * col_cnt(in): column count
  */
 DB_QUERY_RESULT *
-db_alloc_query_result (DB_RESULT_TYPE r_type, int col_cnt)
+db_alloc_query_result(DB_RESULT_TYPE r_type, int col_cnt)
 {
   DB_QUERY_RESULT *r, **qres_ptr;
   int ind, k;
   int new_cnt;
 
 #if defined(QP_DEBUG)
-  if (DB_INVALID_RESTYPE (r_type))
-    {
-      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_QPROC_INVALID_RESTYPE, 0);
-      return (DB_QUERY_RESULT *) NULL;
-    }
+  if (DB_INVALID_RESTYPE(r_type))
+  {
+    er_set(ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_QPROC_INVALID_RESTYPE, 0);
+    return (DB_QUERY_RESULT *)NULL;
+  }
 #endif
 
   /* first search query table result list to see if there is place */
   for (ind = 0, qres_ptr = Qres_table.qres_list; ind < Qres_table.entry_cnt && *qres_ptr != NULL; ind++, qres_ptr++)
-    {
-      ;				/* NULL */
-    }
+  {
+    ; /* NULL */
+  }
 
   if (ind == Qres_table.entry_cnt)
-    {
-      /* query table is full, so enlarge the table */
-      if (Qres_table.entry_cnt == 0)
-	{			/* first time allocation */
-	  Qres_table.qres_list = (DB_QUERY_RESULT **) malloc (QP_QRES_LIST_INIT_CNT * DB_SIZEOF (DB_QUERY_RESULT *));
-	  if (Qres_table.qres_list == NULL)
-	    {
-	      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_OUT_OF_VIRTUAL_MEMORY, 1,
-		      QP_QRES_LIST_INIT_CNT * DB_SIZEOF (DB_QUERY_RESULT *));
-	      return (DB_QUERY_RESULT *) NULL;
-	    }
-	  Qres_table.entry_cnt = QP_QRES_LIST_INIT_CNT;
+  {
+    /* query table is full, so enlarge the table */
+    if (Qres_table.entry_cnt == 0)
+    { /* first time allocation */
+      Qres_table.qres_list = (DB_QUERY_RESULT **)malloc(QP_QRES_LIST_INIT_CNT * DB_SIZEOF(DB_QUERY_RESULT *));
+      if (Qres_table.qres_list == NULL)
+      {
+        er_set(ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_OUT_OF_VIRTUAL_MEMORY, 1,
+               QP_QRES_LIST_INIT_CNT * DB_SIZEOF(DB_QUERY_RESULT *));
+        return (DB_QUERY_RESULT *)NULL;
+      }
+      Qres_table.entry_cnt = QP_QRES_LIST_INIT_CNT;
 
-	  /* initialize query_result allocation resource */
-	  Qres_table.alloc_res.free_qres_cnt = 0;
-	  Qres_table.alloc_res.max_qres_cnt = Qres_table.entry_cnt;
-	  Qres_table.alloc_res.free_qres_list = (DB_QUERY_RESULT *) NULL;
-	}
-      else
-	{
-	  /* expand the existing table */
-	  new_cnt = (int) ((Qres_table.entry_cnt * QP_QRES_LIST_INC_RATE) + 1);
-	  Qres_table.qres_list =
-	    (DB_QUERY_RESULT **) realloc (Qres_table.qres_list, new_cnt * DB_SIZEOF (DB_QUERY_RESULT *));
-	  if (Qres_table.qres_list == NULL)
-	    {
-	      return (DB_QUERY_RESULT *) NULL;
-	    }
-	  Qres_table.entry_cnt = new_cnt;
-
-	  /* expand query result allocation resource */
-	  Qres_table.alloc_res.max_qres_cnt = Qres_table.entry_cnt;
-	}
-
-      /* initialize newly allocated entries */
-      for (k = ind, qres_ptr = (DB_QUERY_RESULT **) Qres_table.qres_list + ind; k < Qres_table.entry_cnt;
-	   k++, qres_ptr++)
-	{
-	  *qres_ptr = (DB_QUERY_RESULT *) NULL;
-	}
+      /* initialize query_result allocation resource */
+      Qres_table.alloc_res.free_qres_cnt = 0;
+      Qres_table.alloc_res.max_qres_cnt = Qres_table.entry_cnt;
+      Qres_table.alloc_res.free_qres_list = (DB_QUERY_RESULT *)NULL;
     }
-  qres_ptr = (DB_QUERY_RESULT **) Qres_table.qres_list + ind;
+    else
+    {
+      /* expand the existing table */
+      new_cnt = (int)((Qres_table.entry_cnt * QP_QRES_LIST_INC_RATE) + 1);
+      Qres_table.qres_list =
+          (DB_QUERY_RESULT **)realloc(Qres_table.qres_list, new_cnt * DB_SIZEOF(DB_QUERY_RESULT *));
+      if (Qres_table.qres_list == NULL)
+      {
+        return (DB_QUERY_RESULT *)NULL;
+      }
+      Qres_table.entry_cnt = new_cnt;
 
-  *qres_ptr = allocate_query_result ();
+      /* expand query result allocation resource */
+      Qres_table.alloc_res.max_qres_cnt = Qres_table.entry_cnt;
+    }
+
+    /* initialize newly allocated entries */
+    for (k = ind, qres_ptr = (DB_QUERY_RESULT **)Qres_table.qres_list + ind; k < Qres_table.entry_cnt;
+         k++, qres_ptr++)
+    {
+      *qres_ptr = (DB_QUERY_RESULT *)NULL;
+    }
+  }
+  qres_ptr = (DB_QUERY_RESULT **)Qres_table.qres_list + ind;
+
+  *qres_ptr = allocate_query_result();
   if (*qres_ptr == NULL)
-    {
-      return (DB_QUERY_RESULT *) NULL;
-    }
+  {
+    return (DB_QUERY_RESULT *)NULL;
+  }
 
   /* connect query result structure to the query table */
   r = *qres_ptr;
@@ -1031,61 +1021,61 @@ db_alloc_query_result (DB_RESULT_TYPE r_type, int col_cnt)
   Qres_table.qres_cnt++;
 
   /* allocation of query type list is done later */
-  r->query_type = (DB_QUERY_TYPE *) NULL;
+  r->query_type = (DB_QUERY_TYPE *)NULL;
   r->type_cnt = 0;
 
   switch (r_type)
+  {
+  case T_SELECT:
+    break;
+
+  case T_CALL:
+    r->res.c.val_ptr = (DB_VALUE *)NULL;
+    break;
+
+  case T_OBJFETCH:
+  {
+    r->res.o.valptr_list = (DB_VALUE **)malloc(col_cnt * DB_SIZEOF(DB_VALUE *));
+    if (r->res.o.valptr_list == NULL)
     {
-    case T_SELECT:
-      break;
-
-    case T_CALL:
-      r->res.c.val_ptr = (DB_VALUE *) NULL;
-      break;
-
-    case T_OBJFETCH:
-      {
-	r->res.o.valptr_list = (DB_VALUE **) malloc (col_cnt * DB_SIZEOF (DB_VALUE *));
-	if (r->res.o.valptr_list == NULL)
-	  {
-	    er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_OUT_OF_VIRTUAL_MEMORY, 1, col_cnt * DB_SIZEOF (DB_VALUE *));
-	    db_free_query_result (r);
-	    return NULL;
-	  }
-	/*
-	 * Initialize the vector so that db_free_query_result() doesn't go
-	 * haywire if this QUERY_RESULT gets freed before being completely
-	 * populated.
-	 */
-	for (k = 0; k < col_cnt; k++)
-	  r->res.o.valptr_list[k] = NULL;
-      }
-      break;
-#if defined (ENABLE_UNUSED_FUNCTION)
-    case T_GET:
-      if (col_cnt <= 0)
-	{
-	  r->res.g.tpl_list = NULL;
-	}
-      else
-	{
-	  r->res.g.tpl_list = (DB_VALUE *) malloc (col_cnt * DB_SIZEOF (DB_VALUE));
-	  if (r->res.g.tpl_list == NULL)
-	    {
-	      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_OUT_OF_VIRTUAL_MEMORY, 1, col_cnt * DB_SIZEOF (DB_VALUE));
-	      db_free_query_result (r);
-	      return NULL;
-	    }
-	  for (k = 0; k < col_cnt; k++)
-	    {
-	      db_make_null (&r->res.g.tpl_list[k]);
-	    }
-	}
-      break;
-#endif
-    default:
-      break;
+      er_set(ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_OUT_OF_VIRTUAL_MEMORY, 1, col_cnt * DB_SIZEOF(DB_VALUE *));
+      db_free_query_result(r);
+      return NULL;
     }
+    /*
+     * Initialize the vector so that db_free_query_result() doesn't go
+     * haywire if this QUERY_RESULT gets freed before being completely
+     * populated.
+     */
+    for (k = 0; k < col_cnt; k++)
+      r->res.o.valptr_list[k] = NULL;
+  }
+  break;
+#if defined(ENABLE_UNUSED_FUNCTION)
+  case T_GET:
+    if (col_cnt <= 0)
+    {
+      r->res.g.tpl_list = NULL;
+    }
+    else
+    {
+      r->res.g.tpl_list = (DB_VALUE *)malloc(col_cnt * DB_SIZEOF(DB_VALUE));
+      if (r->res.g.tpl_list == NULL)
+      {
+        er_set(ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_OUT_OF_VIRTUAL_MEMORY, 1, col_cnt * DB_SIZEOF(DB_VALUE));
+        db_free_query_result(r);
+        return NULL;
+      }
+      for (k = 0; k < col_cnt; k++)
+      {
+        db_make_null(&r->res.g.tpl_list[k]);
+      }
+    }
+    break;
+#endif
+  default:
+    break;
+  }
 
   return r;
 }
@@ -1097,13 +1087,12 @@ db_alloc_query_result (DB_RESULT_TYPE r_type, int col_cnt)
  * r(out): query Result Structure
  * r_type(in): query Result Structure Type
  */
-void
-db_init_query_result (DB_QUERY_RESULT * r, DB_RESULT_TYPE r_type)
+void db_init_query_result(DB_QUERY_RESULT *r, DB_RESULT_TYPE r_type)
 {
   if (r == NULL)
-    {
-      return;
-    }
+  {
+    return;
+  }
 
   r->type = r_type;
   r->status = T_OPEN;
@@ -1111,86 +1100,88 @@ db_init_query_result (DB_QUERY_RESULT * r, DB_RESULT_TYPE r_type)
   r->oid_included = false;
 
   switch (r->type)
-    {
-    case T_SELECT:
-      {
-	r->res.s.query_id = -1;
-	r->res.s.stmt_id = -1;
-	r->res.s.stmt_type = (CUBRID_STMT_TYPE) 0;
-	CACHE_TIME_RESET (&r->res.s.cache_time);
-      }
-      break;
+  {
+  case T_SELECT:
+  {
+    r->res.s.query_id = -1;
+    r->res.s.stmt_id = -1;
+    r->res.s.stmt_type = (CUBRID_STMT_TYPE)0;
+    CACHE_TIME_RESET(&r->res.s.cache_time);
+  }
+  break;
 
-    case T_CALL:
-      r->res.c.crs_pos = C_BEFORE;
-      break;
+  case T_CALL:
+    r->res.c.crs_pos = C_BEFORE;
+    break;
 
-    case T_OBJFETCH:
-      r->res.o.crs_pos = C_BEFORE;
-      break;
+  case T_OBJFETCH:
+    r->res.o.crs_pos = C_BEFORE;
+    break;
 
-#if defined (ENABLE_UNUSED_FUNCTION)
-    case T_GET:
-      {
-	r->res.g.crs_pos = C_BEFORE;
-	r->res.g.tpl_idx = 0;
-      }
-      break;
+#if defined(ENABLE_UNUSED_FUNCTION)
+  case T_GET:
+  {
+    r->res.g.crs_pos = C_BEFORE;
+    r->res.g.tpl_idx = 0;
+  }
+  break;
 #endif
-    default:
-      break;
-    }
-  r->next = (DB_QUERY_RESULT *) NULL;
+  default:
+    break;
+  }
+  r->next = (DB_QUERY_RESULT *)NULL;
 }
 
-#if defined(WINDOWS) || defined (CUBRID_DEBUG)
+#if defined(WINDOWS) || defined(CUBRID_DEBUG)
 /*
  * db_dump_query_result() - this function dumps the content of the query result
  *   structure to standard output.
  * return : void
  * r: Query Result Structure
  */
-void
-db_dump_query_result (DB_QUERY_RESULT * r)
+void db_dump_query_result(DB_QUERY_RESULT *r)
 {
   if (r == NULL)
-    {
-      return;
-    }
+  {
+    return;
+  }
 
 #if defined(QP_DEBUG)
-  if (DB_INVALID_RESTYPE (r->type))
-    {
-      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_QPROC_INVALID_RESTYPE, 0);
-      return;
-    }
+  if (DB_INVALID_RESTYPE(r->type))
+  {
+    er_set(ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_QPROC_INVALID_RESTYPE, 0);
+    return;
+  }
 #endif
 
-  fprintf (stdout, "\nQuery Result Structure: \n");
-  fprintf (stdout, "Type: %s \n",
-	   (r->type == T_SELECT) ? "T_SELECT" : (r->type == T_CALL) ? "T_CALL"
-	   : (r->type == T_OBJFETCH) ? "T_OBJFETCH" : (r->type == T_GET) ? "T_GET" : "T_UNKNOWN");
-  fprintf (stdout, "Status: %s \n",
-	   (r->status == T_OPEN) ? "T_OPEN" : (r->status == T_CLOSED) ? "T_CLOSED" : "T_UNKNOWN");
-  fprintf (stdout, "Column Count: %d \n", r->col_cnt);
-  fprintf (stdout, "Oid_Included: %s \n", (r->oid_included) ? "Yes" : "No");
-  fprintf (stdout, "\n");
+  fprintf(stdout, "\nQuery Result Structure: \n");
+  fprintf(stdout, "Type: %s \n",
+          (r->type == T_SELECT) ? "T_SELECT" : (r->type == T_CALL)   ? "T_CALL"
+                                           : (r->type == T_OBJFETCH) ? "T_OBJFETCH"
+                                           : (r->type == T_GET)      ? "T_GET"
+                                                                     : "T_UNKNOWN");
+  fprintf(stdout, "Status: %s \n",
+          (r->status == T_OPEN) ? "T_OPEN" : (r->status == T_CLOSED) ? "T_CLOSED"
+                                                                     : "T_UNKNOWN");
+  fprintf(stdout, "Column Count: %d \n", r->col_cnt);
+  fprintf(stdout, "Oid_Included: %s \n", (r->oid_included) ? "Yes" : "No");
+  fprintf(stdout, "\n");
   if (r->type == T_SELECT)
-    {
-      fprintf (stdout, "Query_id: %lld \n", (long long) r->res.s.query_id);
-      fprintf (stdout, "Stmt_id: %d \n", r->res.s.stmt_id);
-      fprintf (stdout, "Tuple Cnt: %lld \n", (long long) r->res.s.cursor_id.list_id.tuple_cnt);
-      fprintf (stdout, "Stmt_type: %d \n", r->res.s.stmt_type);
-    }				/* if */
+  {
+    fprintf(stdout, "Query_id: %lld \n", (long long)r->res.s.query_id);
+    fprintf(stdout, "Stmt_id: %d \n", r->res.s.stmt_id);
+    fprintf(stdout, "Tuple Cnt: %lld \n", (long long)r->res.s.cursor_id.list_id.tuple_cnt);
+    fprintf(stdout, "Stmt_type: %d \n", r->res.s.stmt_type);
+  } /* if */
   else if (r->type == T_GET)
-    {
-      fprintf (stdout, "Tuple Cnt: %d \n", r->res.g.n_tuple);
-    }
-  fprintf (stdout, "\n");
+  {
+    fprintf(stdout, "Tuple Cnt: %d \n", r->res.g.n_tuple);
+  }
+  fprintf(stdout, "\n");
 }
 #endif
 
-#if defined(WINDOWS) || defined (ENABLE_UNUSED_FUNCTION)
+#if defined(WINDOWS) || defined(ENABLE_UNUSED_FUNCTION)
 /*
  * db_cp_colname_list() - This function forms a new column name list from the
  *    given one.
@@ -1201,41 +1192,41 @@ db_dump_query_result (DB_QUERY_RESULT * r)
  * note : The returned column name list must be freed with db_free_colname_list
  */
 char **
-db_cp_colname_list (char **colname_list, int cnt)
+db_cp_colname_list(char **colname_list, int cnt)
 {
   char **newname_list;
   int i;
   size_t size;
 
   if (colname_list == NULL)
-    {
-      return NULL;
-    }
+  {
+    return NULL;
+  }
 
-  newname_list = (char **) malloc (cnt * DB_SIZEOF (char *));
+  newname_list = (char **)malloc(cnt * DB_SIZEOF(char *));
   if (newname_list == NULL)
+  {
+    er_set(ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_OUT_OF_VIRTUAL_MEMORY, 1, cnt * DB_SIZEOF(char *));
+    return NULL;
+  }
+
+  for (i = 0; i < cnt; i++)
+  {
+    newname_list[i] = NULL;
+  }
+
+  for (i = 0; i < cnt; i++)
+  {
+    size = strlen(colname_list[i]) + 1;
+    newname_list[i] = (char *)malloc(size);
+    if (newname_list[i] == NULL)
     {
-      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_OUT_OF_VIRTUAL_MEMORY, 1, cnt * DB_SIZEOF (char *));
+      er_set(ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_OUT_OF_VIRTUAL_MEMORY, 1, size);
+      db_free_colname_list(newname_list, cnt);
       return NULL;
     }
-
-  for (i = 0; i < cnt; i++)
-    {
-      newname_list[i] = NULL;
-    }
-
-  for (i = 0; i < cnt; i++)
-    {
-      size = strlen (colname_list[i]) + 1;
-      newname_list[i] = (char *) malloc (size);
-      if (newname_list[i] == NULL)
-	{
-	  er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_OUT_OF_VIRTUAL_MEMORY, 1, size);
-	  db_free_colname_list (newname_list, cnt);
-	  return NULL;
-	}
-      memcpy (newname_list[i], colname_list[i], size);
-    }
+    memcpy(newname_list[i], colname_list[i], size);
+  }
 
   return newname_list;
 }
@@ -1251,37 +1242,37 @@ db_cp_colname_list (char **colname_list, int cnt)
  *       must NOT be freed until qp_free_domain_ptr() is explicitly called.
  */
 SM_DOMAIN **
-db_cp_domain_list (SM_DOMAIN ** domain_list, int cnt)
+db_cp_domain_list(SM_DOMAIN **domain_list, int cnt)
 {
   SM_DOMAIN **newdomain_list;
   int i;
 
   if (domain_list == NULL)
-    {
-      return NULL;
-    }
+  {
+    return NULL;
+  }
 
-  newdomain_list = (SM_DOMAIN **) malloc (cnt * DB_SIZEOF (SM_DOMAIN *));
+  newdomain_list = (SM_DOMAIN **)malloc(cnt * DB_SIZEOF(SM_DOMAIN *));
   if (newdomain_list == NULL)
+  {
+    er_set(ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_OUT_OF_VIRTUAL_MEMORY, 1, cnt * DB_SIZEOF(SM_DOMAIN *));
+    return NULL;
+  }
+
+  for (i = 0; i < cnt; i++)
+  {
+    newdomain_list[i] = NULL;
+  }
+
+  for (i = 0; i < cnt; i++)
+  {
+    newdomain_list[i] = sm_domain_copy(domain_list[i]);
+    if (newdomain_list[i] == NULL)
     {
-      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_OUT_OF_VIRTUAL_MEMORY, 1, cnt * DB_SIZEOF (SM_DOMAIN *));
+      db_free_domain_list(newdomain_list, cnt);
       return NULL;
     }
-
-  for (i = 0; i < cnt; i++)
-    {
-      newdomain_list[i] = NULL;
-    }
-
-  for (i = 0; i < cnt; i++)
-    {
-      newdomain_list[i] = sm_domain_copy (domain_list[i]);
-      if (newdomain_list[i] == NULL)
-	{
-	  db_free_domain_list (newdomain_list, cnt);
-	  return NULL;
-	}
-    }
+  }
 
   return newdomain_list;
 }
@@ -1294,25 +1285,25 @@ db_cp_domain_list (SM_DOMAIN ** domain_list, int cnt)
  * return : void
  * notify_server(in) :
  */
-void
-db_clear_client_query_result (int notify_server, bool end_holdable)
+// 클라이언트에서 트랜잭션이 커밋/중단되거나 서버가 다운될 때 호출되어 기존 쿼리 결과 구조체를 종료하기위한 함수
+void db_clear_client_query_result(int notify_server, bool end_holdable)
 {
   DB_QUERY_RESULT **qres_ptr;
   int k;
 
   /* search query table result list and mark existing entries as closed */
   for (k = 0, qres_ptr = Qres_table.qres_list; k < Qres_table.entry_cnt; k++, qres_ptr++)
+  {
+    if (*qres_ptr == NULL)
     {
-      if (*qres_ptr == NULL)
-	{
-	  continue;
-	}
-      if (((*qres_ptr)->type == T_SELECT && !(*qres_ptr)->res.s.holdable) || end_holdable)
-	{
-	  /* if end_holdable is false, only end queries that are not holdable */
-	  db_query_end_internal (*qres_ptr, notify_server);
-	}
+      continue;
     }
+    if (((*qres_ptr)->type == T_SELECT && !(*qres_ptr)->res.s.holdable) || end_holdable)
+    {
+      /* if end_holdable is false, only end queries that are not holdable */
+      db_query_end_internal(*qres_ptr, notify_server);
+    }
+  }
 }
 
 /*
@@ -1325,24 +1316,24 @@ db_clear_client_query_result (int notify_server, bool end_holdable)
  *  domain field, since it is now a pointer to a cached domain structure.
  */
 static DB_QUERY_TYPE *
-db_cp_query_type_helper (DB_QUERY_TYPE * src, DB_QUERY_TYPE * dest)
+db_cp_query_type_helper(DB_QUERY_TYPE *src, DB_QUERY_TYPE *dest)
 {
   size_t size;
 
-  if (TP_DOMAIN_COLLATION_FLAG (src->domain) != TP_DOMAIN_COLL_NORMAL)
-    {
-      /* special collation domain behave like VARIABLE in query output */
-      assert (TP_TYPE_HAS_COLLATION (src->db_type));
-      dest->db_type = DB_TYPE_VARIABLE;
-      dest->size = 0;
-      dest->domain = tp_domain_resolve_default (DB_TYPE_VARIABLE);
-    }
+  if (TP_DOMAIN_COLLATION_FLAG(src->domain) != TP_DOMAIN_COLL_NORMAL)
+  {
+    /* special collation domain behave like VARIABLE in query output */
+    assert(TP_TYPE_HAS_COLLATION(src->db_type));
+    dest->db_type = DB_TYPE_VARIABLE;
+    dest->size = 0;
+    dest->domain = tp_domain_resolve_default(DB_TYPE_VARIABLE);
+  }
   else
-    {
-      dest->db_type = src->db_type;
-      dest->size = src->size;
-      dest->domain = src->domain;
-    }
+  {
+    dest->db_type = src->db_type;
+    dest->size = src->size;
+    dest->domain = src->domain;
+  }
 
   dest->name = NULL;
   dest->attr_name = NULL;
@@ -1353,57 +1344,57 @@ db_cp_query_type_helper (DB_QUERY_TYPE * src, DB_QUERY_TYPE * dest)
   dest->col_type = src->col_type;
 
   if (src->name != NULL)
+  {
+    size = strlen(src->name) + 1;
+    dest->name = (char *)malloc(size);
+    if (dest->name == NULL)
     {
-      size = strlen (src->name) + 1;
-      dest->name = (char *) malloc (size);
-      if (dest->name == NULL)
-	{
-	  er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_OUT_OF_VIRTUAL_MEMORY, 1, size);
-	  return NULL;
-	}
-      memcpy ((char *) dest->name, src->name, size);
+      er_set(ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_OUT_OF_VIRTUAL_MEMORY, 1, size);
+      return NULL;
     }
+    memcpy((char *)dest->name, src->name, size);
+  }
 
   if (src->attr_name != NULL)
+  {
+    size = strlen(src->attr_name) + 1;
+    dest->attr_name = (char *)malloc(size);
+    if (dest->attr_name == NULL)
     {
-      size = strlen (src->attr_name) + 1;
-      dest->attr_name = (char *) malloc (size);
-      if (dest->attr_name == NULL)
-	{
-	  er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_OUT_OF_VIRTUAL_MEMORY, 1, size);
-	  return NULL;
-	}
-      memcpy ((char *) dest->attr_name, src->attr_name, size);
+      er_set(ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_OUT_OF_VIRTUAL_MEMORY, 1, size);
+      return NULL;
     }
+    memcpy((char *)dest->attr_name, src->attr_name, size);
+  }
 
   if (src->spec_name != NULL)
+  {
+    size = strlen(src->spec_name) + 1;
+    dest->spec_name = (char *)malloc(size);
+    if (dest->spec_name == NULL)
     {
-      size = strlen (src->spec_name) + 1;
-      dest->spec_name = (char *) malloc (size);
-      if (dest->spec_name == NULL)
-	{
-	  er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_OUT_OF_VIRTUAL_MEMORY, 1, size);
-	  return NULL;
-	}
-      memcpy ((char *) dest->spec_name, src->spec_name, size);
+      er_set(ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_OUT_OF_VIRTUAL_MEMORY, 1, size);
+      return NULL;
     }
+    memcpy((char *)dest->spec_name, src->spec_name, size);
+  }
 
   if (src->original_name != NULL)
+  {
+    size = strlen(src->original_name) + 1;
+    dest->original_name = (char *)malloc(size);
+    if (dest->original_name == NULL)
     {
-      size = strlen (src->original_name) + 1;
-      dest->original_name = (char *) malloc (size);
-      if (dest->original_name == NULL)
-	{
-	  er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_OUT_OF_VIRTUAL_MEMORY, 1, size);
-	  return NULL;
-	}
-      memcpy ((char *) dest->original_name, src->original_name, size);
+      er_set(ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_OUT_OF_VIRTUAL_MEMORY, 1, size);
+      return NULL;
     }
+    memcpy((char *)dest->original_name, src->original_name, size);
+  }
 
   if (src->src_domain != NULL)
-    {
-      dest->src_domain = sm_domain_copy (src->src_domain);
-    }
+  {
+    dest->src_domain = sm_domain_copy(src->src_domain);
+  }
 
   return dest;
 }
@@ -1416,7 +1407,7 @@ db_cp_query_type_helper (DB_QUERY_TYPE * src, DB_QUERY_TYPE * dest)
  * copy_only_user(in):
  */
 DB_QUERY_TYPE *
-db_cp_query_type (DB_QUERY_TYPE * query_type, int copy_only_user)
+db_cp_query_type(DB_QUERY_TYPE *query_type, int copy_only_user)
 {
   DB_QUERY_TYPE *q;
   DB_QUERY_TYPE *ptr1, *ptr2;
@@ -1424,38 +1415,38 @@ db_cp_query_type (DB_QUERY_TYPE * query_type, int copy_only_user)
 
   /* find count of nodes to copy */
   for (cnt = 0, ptr1 = query_type; ptr1; ptr1 = ptr1->next)
+  {
+    if ((ptr1->visible_type != SYSTEM_ADDED_COLUMN) && (!copy_only_user || ptr1->visible_type == USER_COLUMN))
     {
-      if ((ptr1->visible_type != SYSTEM_ADDED_COLUMN) && (!copy_only_user || ptr1->visible_type == USER_COLUMN))
-	{
-	  cnt++;
-	}
+      cnt++;
     }
+  }
 
-  q = db_alloc_query_format (cnt);
+  q = db_alloc_query_format(cnt);
   if (q == NULL)
-    {
-      return NULL;
-    }
+  {
+    return NULL;
+  }
 
   for (ptr1 = query_type, ptr2 = q; ptr1; ptr1 = ptr1->next)
+  {
+    if ((ptr1->visible_type != SYSTEM_ADDED_COLUMN) && (!copy_only_user || ptr1->visible_type == USER_COLUMN))
     {
-      if ((ptr1->visible_type != SYSTEM_ADDED_COLUMN) && (!copy_only_user || ptr1->visible_type == USER_COLUMN))
-	{
-	  ptr2 = db_cp_query_type_helper (ptr1, ptr2);
-	  if (ptr2 == NULL)
-	    {
-	      db_free_query_format (q);
-	      return NULL;
-	    }
+      ptr2 = db_cp_query_type_helper(ptr1, ptr2);
+      if (ptr2 == NULL)
+      {
+        db_free_query_format(q);
+        return NULL;
+      }
 
-	  ptr2 = ptr2->next;
-	}
+      ptr2 = ptr2->next;
     }
+  }
 
   return q;
 }
 
-#if defined(WINDOWS) || defined (ENABLE_UNUSED_FUNCTION)
+#if defined(WINDOWS) || defined(ENABLE_UNUSED_FUNCTION)
 /*
  * db_get_query_type() - This function forms a query type list structure from
  *   the given parmeters. The cnt field refers to number of nodes in the
@@ -1474,8 +1465,8 @@ db_cp_query_type (DB_QUERY_TYPE * query_type, int copy_only_user)
  * oid_included(in): hidden first oid column included
  */
 DB_QUERY_TYPE *
-db_get_query_type (DB_TYPE * type_list, int *size_list, char **colname_list, char **attrname_list,
-		   SM_DOMAIN ** domain_list, SM_DOMAIN ** src_domain_list, int cnt, bool oid_included)
+db_get_query_type(DB_TYPE *type_list, int *size_list, char **colname_list, char **attrname_list,
+                  SM_DOMAIN **domain_list, SM_DOMAIN **src_domain_list, int cnt, bool oid_included)
 {
   DB_QUERY_TYPE *q, *type_ptr;
   DB_TYPE *typep;
@@ -1488,20 +1479,20 @@ db_get_query_type (DB_TYPE * type_list, int *size_list, char **colname_list, cha
   int type_cnt;
   size_t size;
 
-  CHECK_CONNECT_NULL ();
+  CHECK_CONNECT_NULL();
 
   if (type_list == NULL || size_list == NULL || cnt <= 0)
-    {
-      return NULL;
-    }
+  {
+    return NULL;
+  }
 
   type_cnt = (oid_included) ? (cnt - 1) : cnt;
 
-  q = db_alloc_query_format (type_cnt);
+  q = db_alloc_query_format(type_cnt);
   if (q == NULL)
-    {
-      return NULL;
-    }
+  {
+    return NULL;
+  }
 
   typep = type_list;
   sizep = size_list;
@@ -1511,77 +1502,77 @@ db_get_query_type (DB_TYPE * type_list, int *size_list, char **colname_list, cha
   src_domainp = src_domain_list;
   type_ptr = q;
   for (k = 0; k < cnt; k++)
+  {
+
+    if (!(oid_included && k == 0))
     {
-
-      if (!(oid_included && k == 0))
-	{
-	  type_ptr->db_type = *typep;
-	  type_ptr->size = *sizep;
-	  type_ptr->name = (char *) NULL;
-	  type_ptr->attr_name = (char *) NULL;
-	  type_ptr->spec_name = (char *) NULL;
-	  type_ptr->original_name = (char *) NULL;
-	  type_ptr->domain = (SM_DOMAIN *) NULL;
-	  type_ptr->src_domain = (SM_DOMAIN *) NULL;
-	  type_ptr->visible_type = USER_COLUMN;
-	  if (colname_list)
-	    {
-	      /* column names can NOT be NULL */
-	      size = strlen (*colnamep) + 1;
-	      type_ptr->name = (char *) malloc (size);
-	      if (type_ptr->name == NULL)
-		{
-		  er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_OUT_OF_VIRTUAL_MEMORY, 1, size);
-		  db_free_query_format (q);
-		  return NULL;
-		}
-	      memcpy ((char *) type_ptr->name, *colnamep, size);
-	    }
-	  if (attrname_list)
-	    {
-	      if (*attrnamep)	/* attribute names can be NULL */
-		{
-		  size = strlen (*attrnamep) + 1;
-		  type_ptr->attr_name = (char *) malloc (size);
-		  if (type_ptr->attr_name == NULL)
-		    {
-		      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_OUT_OF_VIRTUAL_MEMORY, 1, size);
-		      db_free_query_format (q);
-		      return NULL;
-		    }
-		  memcpy ((char *) type_ptr->attr_name, *attrnamep, size);
-		}
-	    }
-	  if (domain_list)
-	    {
-	      type_ptr->domain = sm_domain_copy (*domainp);
-	    }
-	  if (src_domain_list)
-	    {
-	      type_ptr->src_domain = sm_domain_copy (*src_domainp);
-	    }
-
-	  type_ptr = type_ptr->next;
-	}
-      typep++;
-      sizep++;
+      type_ptr->db_type = *typep;
+      type_ptr->size = *sizep;
+      type_ptr->name = (char *)NULL;
+      type_ptr->attr_name = (char *)NULL;
+      type_ptr->spec_name = (char *)NULL;
+      type_ptr->original_name = (char *)NULL;
+      type_ptr->domain = (SM_DOMAIN *)NULL;
+      type_ptr->src_domain = (SM_DOMAIN *)NULL;
+      type_ptr->visible_type = USER_COLUMN;
       if (colname_list)
-	{
-	  colnamep++;
-	}
+      {
+        /* column names can NOT be NULL */
+        size = strlen(*colnamep) + 1;
+        type_ptr->name = (char *)malloc(size);
+        if (type_ptr->name == NULL)
+        {
+          er_set(ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_OUT_OF_VIRTUAL_MEMORY, 1, size);
+          db_free_query_format(q);
+          return NULL;
+        }
+        memcpy((char *)type_ptr->name, *colnamep, size);
+      }
       if (attrname_list)
-	{
-	  attrnamep++;
-	}
+      {
+        if (*attrnamep) /* attribute names can be NULL */
+        {
+          size = strlen(*attrnamep) + 1;
+          type_ptr->attr_name = (char *)malloc(size);
+          if (type_ptr->attr_name == NULL)
+          {
+            er_set(ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_OUT_OF_VIRTUAL_MEMORY, 1, size);
+            db_free_query_format(q);
+            return NULL;
+          }
+          memcpy((char *)type_ptr->attr_name, *attrnamep, size);
+        }
+      }
       if (domain_list)
-	{
-	  domainp++;
-	}
+      {
+        type_ptr->domain = sm_domain_copy(*domainp);
+      }
       if (src_domain_list)
-	{
-	  src_domainp++;
-	}
+      {
+        type_ptr->src_domain = sm_domain_copy(*src_domainp);
+      }
+
+      type_ptr = type_ptr->next;
     }
+    typep++;
+    sizep++;
+    if (colname_list)
+    {
+      colnamep++;
+    }
+    if (attrname_list)
+    {
+      attrnamep++;
+    }
+    if (domain_list)
+    {
+      domainp++;
+    }
+    if (src_domain_list)
+    {
+      src_domainp++;
+    }
+  }
 
   return q;
 }
@@ -1597,31 +1588,30 @@ db_get_query_type (DB_TYPE * type_list, int *size_list, char **colname_list, cha
  *   arg_count   (IN) : number of input values
  *   vals        (IN) : input values
  */
-int
-db_execute_with_values (const char *CSQL_query, DB_QUERY_RESULT ** result, DB_QUERY_ERROR * query_error, int arg_count,
-			DB_VALUE * vals)
+int db_execute_with_values(const char *CSQL_query, DB_QUERY_RESULT **result, DB_QUERY_ERROR *query_error, int arg_count,
+                           DB_VALUE *vals)
 {
   int error;
   int stmt_no;
   DB_SESSION *session = NULL;
 
-  error = db_open_buffer_and_compile_first_statement (CSQL_query, query_error, DB_NO_OIDS, &session, &stmt_no);
+  error = db_open_buffer_and_compile_first_statement(CSQL_query, query_error, DB_NO_OIDS, &session, &stmt_no);
   if (session == NULL)
-    {
-      return error;
-    }
+  {
+    return error;
+  }
 
   if (arg_count > 0)
-    {
-      db_push_values (session, arg_count, vals);
-    }
+  {
+    db_push_values(session, arg_count, vals);
+  }
 
   if (stmt_no > 0)
-    {
-      error = db_execute_statement_local (session, stmt_no, result);
-    }
+  {
+    error = db_execute_statement_local(session, stmt_no, result);
+  }
 
-  db_close_session_local (session);
+  db_close_session_local(session);
 
   return (error);
 }
@@ -1644,15 +1634,14 @@ db_execute_with_values (const char *CSQL_query, DB_QUERY_RESULT ** result, DB_QU
  * note :  The user should call the db_query_format_free() function when
  *    finished with the format list.
  */
-int
-db_get_query_format (const char *CSQL_query, DB_QUERY_TYPE ** result, DB_QUERY_ERROR * query_error)
+int db_get_query_format(const char *CSQL_query, DB_QUERY_TYPE **result, DB_QUERY_ERROR *query_error)
 {
   int error;
 
-  error = db_compile_and_execute_queries_internal (CSQL_query, result, query_error, DB_NO_OIDS, 0, true);
+  error = db_compile_and_execute_queries_internal(CSQL_query, result, query_error, DB_NO_OIDS, 0, true);
 
   return (error < 0 ? error : NO_ERROR);
-}				/* db_get_query_format */
+} /* db_get_query_format */
 
 /*
  * db_query_format_next() - This function is used to scan the elements of the
@@ -1664,9 +1653,9 @@ db_get_query_format (const char *CSQL_query, DB_QUERY_TYPE ** result, DB_QUERY_E
  *    db_query_format_free()function.
  */
 DB_QUERY_TYPE *
-db_query_format_next (DB_QUERY_TYPE * query_type)
+db_query_format_next(DB_QUERY_TYPE *query_type)
 {
-  CHECK_1ARG_NULL (query_type);
+  CHECK_1ARG_NULL(query_type);
   return query_type->next;
 }
 
@@ -1677,12 +1666,11 @@ db_query_format_next (DB_QUERY_TYPE * query_type)
  * query_type(in): Pointer to the current type list node
  */
 DB_COL_TYPE
-db_query_format_col_type (DB_QUERY_TYPE * query_type)
+db_query_format_col_type(DB_QUERY_TYPE *query_type)
 {
-  CHECK_1ARG_RETURN_EXPR (query_type, DB_COL_OTHER);
+  CHECK_1ARG_RETURN_EXPR(query_type, DB_COL_OTHER);
   return query_type->col_type;
 }
-
 
 /*
  * db_query_format_name() - This function is used to get the name of a column
@@ -1696,10 +1684,10 @@ db_query_format_col_type (DB_QUERY_TYPE * query_type)
  *   for example, x + 10.
  */
 char *
-db_query_format_name (DB_QUERY_TYPE * query_type)
+db_query_format_name(DB_QUERY_TYPE *query_type)
 {
-  CHECK_1ARG_NULL (query_type);
-  return ((char *) query_type->name);
+  CHECK_1ARG_NULL(query_type);
+  return ((char *)query_type->name);
 }
 
 /*
@@ -1709,10 +1697,10 @@ db_query_format_name (DB_QUERY_TYPE * query_type)
  * query_type(in): pointer to the current type list node
  */
 char *
-db_query_format_attr_name (DB_QUERY_TYPE * query_type)
+db_query_format_attr_name(DB_QUERY_TYPE *query_type)
 {
-  CHECK_1ARG_NULL (query_type);
-  return ((char *) query_type->attr_name);
+  CHECK_1ARG_NULL(query_type);
+  return ((char *)query_type->attr_name);
 }
 
 /*
@@ -1722,10 +1710,10 @@ db_query_format_attr_name (DB_QUERY_TYPE * query_type)
  * query_type(in): Pointer to the current type list node
  */
 char *
-db_query_format_spec_name (DB_QUERY_TYPE * query_type)
+db_query_format_spec_name(DB_QUERY_TYPE *query_type)
 {
-  CHECK_1ARG_NULL (query_type);
-  return ((char *) query_type->spec_name);
+  CHECK_1ARG_NULL(query_type);
+  return ((char *)query_type->spec_name);
 }
 
 /*
@@ -1735,10 +1723,10 @@ db_query_format_spec_name (DB_QUERY_TYPE * query_type)
  * query_type: Pointer to the current type list node
  */
 char *
-db_query_format_original_name (DB_QUERY_TYPE * query_type)
+db_query_format_original_name(DB_QUERY_TYPE *query_type)
 {
-  CHECK_1ARG_NULL (query_type);
-  return ((char *) query_type->original_name);
+  CHECK_1ARG_NULL(query_type);
+  return ((char *)query_type->original_name);
 }
 
 /*
@@ -1748,9 +1736,9 @@ db_query_format_original_name (DB_QUERY_TYPE * query_type)
  * query_type(in): pointer to the current type list node
  */
 SM_DOMAIN *
-db_query_format_domain (DB_QUERY_TYPE * query_type)
+db_query_format_domain(DB_QUERY_TYPE *query_type)
 {
-  CHECK_1ARG_NULL (query_type);
+  CHECK_1ARG_NULL(query_type);
   return query_type->domain;
 }
 
@@ -1762,9 +1750,9 @@ db_query_format_domain (DB_QUERY_TYPE * query_type)
  *
  */
 SM_DOMAIN *
-db_query_format_src_domain (DB_QUERY_TYPE * query_type)
+db_query_format_src_domain(DB_QUERY_TYPE *query_type)
 {
-  CHECK_1ARG_NULL (query_type);
+  CHECK_1ARG_NULL(query_type);
   return query_type->src_domain;
 }
 
@@ -1777,9 +1765,9 @@ db_query_format_src_domain (DB_QUERY_TYPE * query_type)
  * note : Use the db_query_format_domain() function for non-primitive types.
  */
 DB_TYPE
-db_query_format_type (DB_QUERY_TYPE * query_type)
+db_query_format_type(DB_QUERY_TYPE *query_type)
 {
-  CHECK_1ARG_RETURN_EXPR (query_type, DB_TYPE_NULL);
+  CHECK_1ARG_RETURN_EXPR(query_type, DB_TYPE_NULL);
   return query_type->db_type;
 }
 
@@ -1790,10 +1778,9 @@ db_query_format_type (DB_QUERY_TYPE * query_type)
  * return : data size of the current type list node
  * query_type(in): Pointer to the current type list node
  */
-int
-db_query_format_size (DB_QUERY_TYPE * query_type)
+int db_query_format_size(DB_QUERY_TYPE *query_type)
 {
-  CHECK_1ARG_MINUSONE (query_type);
+  CHECK_1ARG_MINUSONE(query_type);
   return query_type->size;
 }
 
@@ -1809,15 +1796,14 @@ db_query_format_size (DB_QUERY_TYPE * query_type)
  *    middle of the list. You must use the exact return value. Do not use the
  *    return value of the db_query_format_next() function.
  */
-void
-db_query_format_free (DB_QUERY_TYPE * query_type)
+void db_query_format_free(DB_QUERY_TYPE *query_type)
 {
   if (query_type == NULL)
-    {
-      return;
-    }
+  {
+    return;
+  }
 
-  db_free_query_format (query_type);
+  db_free_query_format(query_type);
 }
 
 /*
@@ -1827,23 +1813,23 @@ db_query_format_free (DB_QUERY_TYPE * query_type)
  * query_type(in): Pointer to the current type list node
  */
 const char *
-db_query_format_class_name (DB_QUERY_TYPE * query_type)
+db_query_format_class_name(DB_QUERY_TYPE *query_type)
 {
   SM_DOMAIN *src_domain = NULL;
 
-  CHECK_1ARG_NULL (query_type);
+  CHECK_1ARG_NULL(query_type);
 
-  src_domain = db_query_format_src_domain (query_type);
+  src_domain = db_query_format_src_domain(query_type);
   if (src_domain == NULL)
-    {
-      return (const char *) NULL;
-    }
+  {
+    return (const char *)NULL;
+  }
   if (src_domain->class_mop == NULL)
-    {
-      return NULL;
-    }
+  {
+    return NULL;
+  }
 
-  return db_get_class_name (src_domain->class_mop);
+  return db_get_class_name(src_domain->class_mop);
 }
 
 /*
@@ -1852,23 +1838,22 @@ db_query_format_class_name (DB_QUERY_TYPE * query_type)
  * return : nullability of current type list node
  * query_type(in): Pointer to the current type list node
  */
-int
-db_query_format_is_non_null (DB_QUERY_TYPE * query_type)
+int db_query_format_is_non_null(DB_QUERY_TYPE *query_type)
 {
   SM_DOMAIN *src_domain = NULL;
   DB_ATTRIBUTE *attr = NULL;
 
-  CHECK_1ARG_RETURN_EXPR (query_type, ER_OBJ_INVALID_ARGUMENT);
+  CHECK_1ARG_RETURN_EXPR(query_type, ER_OBJ_INVALID_ARGUMENT);
 
-  src_domain = db_query_format_src_domain (query_type);
+  src_domain = db_query_format_src_domain(query_type);
   if (src_domain && src_domain->class_mop && query_type->attr_name)
+  {
+    attr = db_get_attribute(src_domain->class_mop, query_type->attr_name);
+    if (attr)
     {
-      attr = db_get_attribute (src_domain->class_mop, query_type->attr_name);
-      if (attr)
-	{
-	  return db_attribute_is_non_null (attr);
-	}
+      return db_attribute_is_non_null(attr);
     }
+  }
 
   /*
    * query_type is not an attribute.
@@ -1894,12 +1879,11 @@ db_query_format_is_non_null (DB_QUERY_TYPE * query_type)
  *
  * note : result must be deallocated with db_query_end() function.
  */
-int
-db_query_execute (const char *CSQL_query, DB_QUERY_RESULT ** result, DB_QUERY_ERROR * query_error)
+int db_query_execute(const char *CSQL_query, DB_QUERY_RESULT **result, DB_QUERY_ERROR *query_error)
 {
   int error;
 
-  error = db_compile_and_execute_queries_internal (CSQL_query, result, query_error, DB_NO_OIDS, 1, true);
+  error = db_compile_and_execute_queries_internal(CSQL_query, result, query_error, DB_NO_OIDS, 1, true);
 
   return (error < 0 ? error : NO_ERROR);
 }
@@ -1922,21 +1906,20 @@ db_query_execute (const char *CSQL_query, DB_QUERY_RESULT ** result, DB_QUERY_ER
  *    aborting the transaction. Any attempt to use such a structure after the
  *    end of the transaction in which it was created will result in an error.
  */
-int
-db_execute (const char *CSQL_query, DB_QUERY_RESULT ** result, DB_QUERY_ERROR * query_error)
+int db_execute(const char *CSQL_query, DB_QUERY_RESULT **result, DB_QUERY_ERROR *query_error)
 {
   int retval;
-  char *sql_buf = strdup (CSQL_query);
+  char *sql_buf = strdup(CSQL_query);
 
   if (sql_buf == NULL)
-    {
-      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_OUT_OF_VIRTUAL_MEMORY, 1, strlen (CSQL_query));
-      return er_errid ();
-    }
+  {
+    er_set(ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_OUT_OF_VIRTUAL_MEMORY, 1, strlen(CSQL_query));
+    return er_errid();
+  }
 
-  retval = db_compile_and_execute_queries_internal (sql_buf, result, query_error, DB_NO_OIDS, 1, true);
+  retval = db_compile_and_execute_queries_internal(sql_buf, result, query_error, DB_NO_OIDS, 1, true);
 
-  free (sql_buf);
+  free(sql_buf);
 
   return (retval);
 }
@@ -1948,17 +1931,16 @@ db_execute (const char *CSQL_query, DB_QUERY_RESULT ** result, DB_QUERY_ERROR * 
  * result(out):
  * query_error(out):
  */
-int
-db_execute_oid (const char *CSQL_query, DB_QUERY_RESULT ** result, DB_QUERY_ERROR * query_error)
+int db_execute_oid(const char *CSQL_query, DB_QUERY_RESULT **result, DB_QUERY_ERROR *query_error)
 {
   int retval;
 
-  retval = db_compile_and_execute_queries_internal (CSQL_query, result, query_error, DB_ROW_OIDS, 1, true);
+  retval = db_compile_and_execute_queries_internal(CSQL_query, result, query_error, DB_ROW_OIDS, 1, true);
 
   return (retval);
 }
 
-#if defined(WINDOWS) || defined (ENABLE_UNUSED_FUNCTION)
+#if defined(WINDOWS) || defined(ENABLE_UNUSED_FUNCTION)
 /*
  * db_query_execute_immediate() -
  * return :
@@ -1966,17 +1948,16 @@ db_execute_oid (const char *CSQL_query, DB_QUERY_RESULT ** result, DB_QUERY_ERRO
  * result(out):
  * query_error(out):
  */
-int
-db_query_execute_immediate (const char *CSQL_query, DB_QUERY_RESULT ** result, DB_QUERY_ERROR * query_error)
+int db_query_execute_immediate(const char *CSQL_query, DB_QUERY_RESULT **result, DB_QUERY_ERROR *query_error)
 {
   int r;
 
 #if defined(CUBRID_DEBUG)
-  fprintf (stdout, "db_query_execute_immediate is a deprecated function.\n");
-  fprintf (stdout, "use the equivalent function db_execute.\n");
+  fprintf(stdout, "db_query_execute_immediate is a deprecated function.\n");
+  fprintf(stdout, "use the equivalent function db_execute.\n");
 #endif
 
-  r = db_compile_and_execute_queries_internal (CSQL_query, result, query_error, DB_NO_OIDS, 1, true);
+  r = db_compile_and_execute_queries_internal(CSQL_query, result, query_error, DB_NO_OIDS, 1, true);
 
   return r;
 }
@@ -1994,8 +1975,8 @@ db_query_execute_immediate (const char *CSQL_query, DB_QUERY_RESULT ** result, D
  * attrname_list(out): List of attribute names
  */
 DB_QUERY_RESULT *
-db_get_objfetch_query_result (DB_VALUE * val_list, int val_cnt, int *size_list, char **colname_list,
-			      char **attrname_list)
+db_get_objfetch_query_result(DB_VALUE *val_list, int val_cnt, int *size_list, char **colname_list,
+                             char **attrname_list)
 {
   DB_QUERY_RESULT *r;
   DB_QUERY_TYPE *typep;
@@ -2006,83 +1987,82 @@ db_get_objfetch_query_result (DB_VALUE * val_list, int val_cnt, int *size_list, 
   char **attr_namep;
   size_t str_size;
 
-  CHECK_CONNECT_NULL ();
-  CHECK_1ARG_NULL (val_list);
+  CHECK_CONNECT_NULL();
+  CHECK_1ARG_NULL(val_list);
 
-  r = db_alloc_query_result (T_OBJFETCH, val_cnt);
+  r = db_alloc_query_result(T_OBJFETCH, val_cnt);
   if (r == NULL)
-    {
-      return NULL;
-    }
-  db_init_query_result (r, T_OBJFETCH);
+  {
+    return NULL;
+  }
+  db_init_query_result(r, T_OBJFETCH);
   r->type = T_OBJFETCH;
   r->col_cnt = val_cnt;
   r->oid_included = false;
 
   /* allocate and initialize type list */
   r->type_cnt = val_cnt;
-  r->query_type = db_alloc_query_format (val_cnt);
+  r->query_type = db_alloc_query_format(val_cnt);
   if (r->query_type == NULL)
-    {
-      db_free_query_result (r);
-      return NULL;
-    }
+  {
+    db_free_query_result(r);
+    return NULL;
+  }
   if (val_cnt > 0)
+  {
+    for (k = 0, typep = r->query_type, valp = val_list, sizep = size_list, namep = colname_list, attr_namep = attrname_list; k < val_cnt; k++, typep = typep->next, valp++, sizep++)
     {
-      for (k = 0, typep = r->query_type, valp = val_list, sizep = size_list, namep = colname_list, attr_namep =
-	   attrname_list; k < val_cnt; k++, typep = typep->next, valp++, sizep++)
-	{
-	  typep->db_type = DB_VALUE_TYPE (valp);
-	  typep->size = *sizep;
-	  typep->name = (char *) NULL;
-	  typep->attr_name = (char *) NULL;
-	  typep->spec_name = (char *) NULL;
-	  typep->original_name = (char *) NULL;
-	  typep->domain = (SM_DOMAIN *) NULL;
-	  typep->src_domain = (SM_DOMAIN *) NULL;
-	  if (colname_list != NULL)
-	    {
-	      /* column names can NOT be NULL */
-	      str_size = strlen (*namep) + 1;
-	      typep->name = (char *) malloc (str_size);
-	      if (typep->name == NULL)
-		{
-		  er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_OUT_OF_VIRTUAL_MEMORY, 1, str_size);
-		  db_free_query_result (r);
-		  return NULL;
-		}
-	      memcpy ((char *) typep->name, *namep, str_size);
-	      namep++;
-	    }
-	  if (attrname_list != NULL)
-	    {
-	      /* attribute names can be NULL */
-	      if (*attr_namep)
-		{
-		  str_size = strlen (*attr_namep) + 1;
-		  typep->attr_name = (char *) malloc (str_size);
-		  if (typep->attr_name == NULL)
-		    {
-		      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_OUT_OF_VIRTUAL_MEMORY, 1, str_size);
-		      db_free_query_result (r);
-		      return NULL;
-		    }
-		  memcpy ((char *) typep->attr_name, *attr_namep, str_size);
-		}
-	      attr_namep++;
-	    }
-	}
+      typep->db_type = DB_VALUE_TYPE(valp);
+      typep->size = *sizep;
+      typep->name = (char *)NULL;
+      typep->attr_name = (char *)NULL;
+      typep->spec_name = (char *)NULL;
+      typep->original_name = (char *)NULL;
+      typep->domain = (SM_DOMAIN *)NULL;
+      typep->src_domain = (SM_DOMAIN *)NULL;
+      if (colname_list != NULL)
+      {
+        /* column names can NOT be NULL */
+        str_size = strlen(*namep) + 1;
+        typep->name = (char *)malloc(str_size);
+        if (typep->name == NULL)
+        {
+          er_set(ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_OUT_OF_VIRTUAL_MEMORY, 1, str_size);
+          db_free_query_result(r);
+          return NULL;
+        }
+        memcpy((char *)typep->name, *namep, str_size);
+        namep++;
+      }
+      if (attrname_list != NULL)
+      {
+        /* attribute names can be NULL */
+        if (*attr_namep)
+        {
+          str_size = strlen(*attr_namep) + 1;
+          typep->attr_name = (char *)malloc(str_size);
+          if (typep->attr_name == NULL)
+          {
+            er_set(ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_OUT_OF_VIRTUAL_MEMORY, 1, str_size);
+            db_free_query_result(r);
+            return NULL;
+          }
+          memcpy((char *)typep->attr_name, *attr_namep, str_size);
+        }
+        attr_namep++;
+      }
     }
+  }
   r->res.o.crs_pos = C_BEFORE;
   for (k = 0, ovalp = r->res.o.valptr_list, valp = val_list; k < r->col_cnt; k++, ovalp++, valp++)
+  {
+    *ovalp = db_value_copy(valp);
+    if ((*ovalp) == NULL)
     {
-      *ovalp = db_value_copy (valp);
-      if ((*ovalp) == NULL)
-	{
-	  db_free_query_result (r);
-	  return NULL;
-	}
+      db_free_query_result(r);
+      return NULL;
     }
+  }
   return r;
 }
 #endif
@@ -2095,48 +2075,48 @@ db_get_objfetch_query_result (DB_VALUE * val_list, int val_cnt, int *size_list, 
  * val(in): Single Value
  */
 DB_QUERY_RESULT *
-db_get_db_value_query_result (DB_VALUE * val)
+db_get_db_value_query_result(DB_VALUE *val)
 {
   DB_QUERY_RESULT *r;
 
-  CHECK_CONNECT_NULL ();
-  CHECK_1ARG_NULL (val);
+  CHECK_CONNECT_NULL();
+  CHECK_1ARG_NULL(val);
 
-  r = db_alloc_query_result (T_CALL, 1);
+  r = db_alloc_query_result(T_CALL, 1);
   if (r == NULL)
-    {
-      return NULL;
-    }
+  {
+    return NULL;
+  }
 
-  db_init_query_result (r, T_CALL);
+  db_init_query_result(r, T_CALL);
   r->type = T_CALL;
   r->col_cnt = 1;
   r->oid_included = false;
 
   /* allocate and initialize type list */
   r->type_cnt = 1;
-  r->query_type = db_alloc_query_format (1);
+  r->query_type = db_alloc_query_format(1);
   if (r->query_type == NULL)
-    {
-      db_free_query_result (r);
-      return NULL;
-    }				/* if */
-  r->query_type->db_type = DB_VALUE_TYPE (val);
-  r->query_type->name = (char *) NULL;
-  r->query_type->attr_name = (char *) NULL;
-  r->query_type->spec_name = (char *) NULL;
-  r->query_type->original_name = (char *) NULL;
-  r->query_type->domain = (SM_DOMAIN *) NULL;
-  r->query_type->src_domain = (SM_DOMAIN *) NULL;
+  {
+    db_free_query_result(r);
+    return NULL;
+  } /* if */
+  r->query_type->db_type = DB_VALUE_TYPE(val);
+  r->query_type->name = (char *)NULL;
+  r->query_type->attr_name = (char *)NULL;
+  r->query_type->spec_name = (char *)NULL;
+  r->query_type->original_name = (char *)NULL;
+  r->query_type->domain = (SM_DOMAIN *)NULL;
+  r->query_type->src_domain = (SM_DOMAIN *)NULL;
   r->query_type->size = 0;
 
   r->res.c.crs_pos = C_BEFORE;
-  r->res.c.val_ptr = db_value_copy (val);
+  r->res.c.val_ptr = db_value_copy(val);
   if (r->res.c.val_ptr == NULL)
-    {
-      db_free_query_result (r);
-      return NULL;
-    }
+  {
+    db_free_query_result(r);
+    return NULL;
+  }
 
   return r;
 }
@@ -2151,28 +2131,27 @@ db_get_db_value_query_result (DB_VALUE * val)
  * note : The caller should call db_query_format_free routine to
  *   deallocate the allocated type list region.
  */
-int
-db_get_query_result_format (DB_QUERY_RESULT * result, DB_QUERY_TYPE ** type_list)
+int db_get_query_result_format(DB_QUERY_RESULT *result, DB_QUERY_TYPE **type_list)
 {
   int retval;
 
-  CHECK_CONNECT_ERROR ();
+  CHECK_CONNECT_ERROR();
   *type_list = NULL;
 
-  CHECK_1ARG_ERROR (result);
+  CHECK_1ARG_ERROR(result);
   if (result->status == T_CLOSED)
-    {
-      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_QPROC_OPR_ON_CLOSED_QRES, 0);
-      return ER_QPROC_OPR_ON_CLOSED_QRES;
-    }
+  {
+    er_set(ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_QPROC_OPR_ON_CLOSED_QRES, 0);
+    return ER_QPROC_OPR_ON_CLOSED_QRES;
+  }
 
-  *type_list = db_cp_query_type (result->query_type, true);
+  *type_list = db_cp_query_type(result->query_type, true);
   if (*type_list == NULL)
-    {
-      assert (er_errid () != NO_ERROR);
-      retval = er_errid ();
-      return (retval);
-    }
+  {
+    assert(er_errid() != NO_ERROR);
+    retval = er_errid();
+    return (retval);
+  }
 
   return NO_ERROR;
 }
@@ -2184,103 +2163,103 @@ db_get_query_result_format (DB_QUERY_RESULT * result, DB_QUERY_TYPE ** type_list
  * return : error code or cursor
  * result(in/out): Pointer to the query result structure
  */
-int
-db_query_next_tuple (DB_QUERY_RESULT * result)
+int db_query_next_tuple(DB_QUERY_RESULT *result)
 {
   int retval;
   CURSOR_POSITION *c_pos;
 
-  CHECK_CONNECT_ERROR ();
-  CHECK_1ARG_ERROR (result);
+  CHECK_CONNECT_ERROR();
+  CHECK_1ARG_ERROR(result);
 
   if (result->status == T_CLOSED)
-    {
-      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_QPROC_OPR_ON_CLOSED_QRES, 0);
-      return ER_QPROC_OPR_ON_CLOSED_QRES;
-    }
+  {
+    er_set(ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_QPROC_OPR_ON_CLOSED_QRES, 0);
+    return ER_QPROC_OPR_ON_CLOSED_QRES;
+  }
 
   switch (result->type)
+  {
+  case T_SELECT:
+    retval = cursor_next_tuple(&result->res.s.cursor_id);
+    break;
+
+  case T_CALL:
+  case T_OBJFETCH:
+  {
+    c_pos = ((result->type == T_CALL)
+                 ? (CURSOR_POSITION *)(&result->res.c.crs_pos)
+                 : (CURSOR_POSITION *)(&result->res.o.crs_pos));
+    switch (*c_pos)
     {
-    case T_SELECT:
-      retval = cursor_next_tuple (&result->res.s.cursor_id);
+    case C_BEFORE:
+      *c_pos = C_ON;
+      retval = DB_CURSOR_SUCCESS;
       break;
-
-    case T_CALL:
-    case T_OBJFETCH:
-      {
-	c_pos = ((result->type == T_CALL)
-		 ? (CURSOR_POSITION *) (&result->res.c.crs_pos) : (CURSOR_POSITION *) (&result->res.o.crs_pos));
-	switch (*c_pos)
-	  {
-	  case C_BEFORE:
-	    *c_pos = C_ON;
-	    retval = DB_CURSOR_SUCCESS;
-	    break;
-	  case C_ON:
-	  case C_AFTER:
-	    *c_pos = C_AFTER;
-	    retval = DB_CURSOR_END;
-	    break;
-	  default:
-	    retval = ER_QPROC_UNKNOWN_CRSPOS;
-	    er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_QPROC_UNKNOWN_CRSPOS, 0);
-	    break;
-	  }
-      }
+    case C_ON:
+    case C_AFTER:
+      *c_pos = C_AFTER;
+      retval = DB_CURSOR_END;
       break;
-
-#if defined (ENABLE_UNUSED_FUNCTION)
-    case T_GET:
-      {
-	c_pos = &result->res.g.crs_pos;
-
-	if (result->res.g.n_tuple == 0)
-	  {
-	    *c_pos = C_AFTER;
-	    retval = DB_CURSOR_END;
-	  }
-	else
-	  {
-	    switch (*c_pos)
-	      {
-	      case C_BEFORE:
-		{
-		  result->res.g.tpl_idx = 0;
-		  *c_pos = C_ON;
-		  retval = DB_CURSOR_SUCCESS;
-		}
-		break;
-	      case C_ON:
-		{
-		  result->res.g.tpl_idx += result->col_cnt;
-		  if (result->res.g.tpl_idx >= (result->res.g.n_tuple * result->col_cnt))
-		    {
-		      *c_pos = C_AFTER;
-		      retval = DB_CURSOR_END;
-		      break;
-		    }
-		  retval = DB_CURSOR_SUCCESS;
-		}
-		break;
-	      case C_AFTER:
-		retval = DB_CURSOR_END;
-		break;
-	      default:
-		retval = ER_QPROC_UNKNOWN_CRSPOS;
-		er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_QPROC_UNKNOWN_CRSPOS, 0);
-		break;
-	      }
-	  }
-      }
-      break;
-#endif
     default:
-      {
-	retval = ER_QPROC_INVALID_RESTYPE;
-	er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_QPROC_INVALID_RESTYPE, 0);
-      }
+      retval = ER_QPROC_UNKNOWN_CRSPOS;
+      er_set(ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_QPROC_UNKNOWN_CRSPOS, 0);
       break;
     }
+  }
+  break;
+
+#if defined(ENABLE_UNUSED_FUNCTION)
+  case T_GET:
+  {
+    c_pos = &result->res.g.crs_pos;
+
+    if (result->res.g.n_tuple == 0)
+    {
+      *c_pos = C_AFTER;
+      retval = DB_CURSOR_END;
+    }
+    else
+    {
+      switch (*c_pos)
+      {
+      case C_BEFORE:
+      {
+        result->res.g.tpl_idx = 0;
+        *c_pos = C_ON;
+        retval = DB_CURSOR_SUCCESS;
+      }
+      break;
+      case C_ON:
+      {
+        result->res.g.tpl_idx += result->col_cnt;
+        if (result->res.g.tpl_idx >= (result->res.g.n_tuple * result->col_cnt))
+        {
+          *c_pos = C_AFTER;
+          retval = DB_CURSOR_END;
+          break;
+        }
+        retval = DB_CURSOR_SUCCESS;
+      }
+      break;
+      case C_AFTER:
+        retval = DB_CURSOR_END;
+        break;
+      default:
+        retval = ER_QPROC_UNKNOWN_CRSPOS;
+        er_set(ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_QPROC_UNKNOWN_CRSPOS, 0);
+        break;
+      }
+    }
+  }
+  break;
+#endif
+  default:
+  {
+    retval = ER_QPROC_INVALID_RESTYPE;
+    er_set(ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_QPROC_INVALID_RESTYPE, 0);
+  }
+  break;
+  }
 
   return (retval);
 }
@@ -2292,108 +2271,108 @@ db_query_next_tuple (DB_QUERY_RESULT * result)
  * return : error code or cursor
  * result(in/out): Pointer to the query result structure
  */
-int
-db_query_prev_tuple (DB_QUERY_RESULT * result)
+int db_query_prev_tuple(DB_QUERY_RESULT *result)
 {
   int retval;
   CURSOR_POSITION *c_pos;
 
-  CHECK_CONNECT_ERROR ();
+  CHECK_CONNECT_ERROR();
 
-  CHECK_1ARG_ERROR (result);
+  CHECK_1ARG_ERROR(result);
 
   if (result->status == T_CLOSED)
-    {
-      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_QPROC_OPR_ON_CLOSED_QRES, 0);
-      return ER_QPROC_OPR_ON_CLOSED_QRES;
-    }
+  {
+    er_set(ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_QPROC_OPR_ON_CLOSED_QRES, 0);
+    return ER_QPROC_OPR_ON_CLOSED_QRES;
+  }
 
   switch (result->type)
+  {
+  case T_SELECT:
+    retval = cursor_prev_tuple(&result->res.s.cursor_id);
+    break;
+
+  case T_CALL:
+  case T_OBJFETCH:
+  {
+    c_pos = ((result->type == T_CALL)
+                 ? (CURSOR_POSITION *)(&result->res.c.crs_pos)
+                 : (CURSOR_POSITION *)(&result->res.o.crs_pos));
+    switch (*c_pos)
     {
-    case T_SELECT:
-      retval = cursor_prev_tuple (&result->res.s.cursor_id);
-      break;
+    case C_BEFORE:
+    case C_ON:
+    {
+      *c_pos = C_BEFORE;
+      retval = DB_CURSOR_END;
+    }
+    break;
 
-    case T_CALL:
-    case T_OBJFETCH:
-      {
-	c_pos = ((result->type == T_CALL)
-		 ? (CURSOR_POSITION *) (&result->res.c.crs_pos) : (CURSOR_POSITION *) (&result->res.o.crs_pos));
-	switch (*c_pos)
-	  {
-	  case C_BEFORE:
-	  case C_ON:
-	    {
-	      *c_pos = C_BEFORE;
-	      retval = DB_CURSOR_END;
-	    }
-	    break;
+    case C_AFTER:
+    {
+      *c_pos = C_ON;
+      retval = DB_CURSOR_SUCCESS;
+    }
+    break;
 
-	  case C_AFTER:
-	    {
-	      *c_pos = C_ON;
-	      retval = DB_CURSOR_SUCCESS;
-	    }
-	    break;
-
-	  default:
-	    retval = ER_QPROC_UNKNOWN_CRSPOS;
-	    er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_QPROC_UNKNOWN_CRSPOS, 0);
-	    break;
-	  }
-      }
-      break;
-
-#if defined (ENABLE_UNUSED_FUNCTION)
-    case T_GET:
-      {
-	c_pos = &result->res.g.crs_pos;
-	if (result->res.g.n_tuple == 0)
-	  {
-	    *c_pos = C_BEFORE;
-	    retval = DB_CURSOR_END;
-	    break;
-	  }
-	else
-	  {
-	    switch (*c_pos)
-	      {
-	      case C_BEFORE:
-		retval = DB_CURSOR_SUCCESS;
-		break;
-	      case C_ON:
-		{
-		  result->res.g.tpl_idx -= result->col_cnt;
-		  if (result->res.g.tpl_idx < 0)
-		    {
-		      *c_pos = C_BEFORE;
-		      retval = DB_CURSOR_END;
-		      break;
-		    }
-		  retval = DB_CURSOR_SUCCESS;
-		}
-		break;
-	      case C_AFTER:
-		{
-		  result->res.g.tpl_idx = (result->res.g.n_tuple - 1) * result->col_cnt;
-		  *c_pos = C_ON;
-		  retval = DB_CURSOR_SUCCESS;
-		}
-		break;
-	      default:
-		retval = ER_QPROC_UNKNOWN_CRSPOS;
-		er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_QPROC_UNKNOWN_CRSPOS, 0);
-		break;
-	      }
-	  }
-      }
-      break;
-#endif
     default:
-      retval = ER_QPROC_INVALID_RESTYPE;
-      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_QPROC_INVALID_RESTYPE, 0);
+      retval = ER_QPROC_UNKNOWN_CRSPOS;
+      er_set(ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_QPROC_UNKNOWN_CRSPOS, 0);
       break;
     }
+  }
+  break;
+
+#if defined(ENABLE_UNUSED_FUNCTION)
+  case T_GET:
+  {
+    c_pos = &result->res.g.crs_pos;
+    if (result->res.g.n_tuple == 0)
+    {
+      *c_pos = C_BEFORE;
+      retval = DB_CURSOR_END;
+      break;
+    }
+    else
+    {
+      switch (*c_pos)
+      {
+      case C_BEFORE:
+        retval = DB_CURSOR_SUCCESS;
+        break;
+      case C_ON:
+      {
+        result->res.g.tpl_idx -= result->col_cnt;
+        if (result->res.g.tpl_idx < 0)
+        {
+          *c_pos = C_BEFORE;
+          retval = DB_CURSOR_END;
+          break;
+        }
+        retval = DB_CURSOR_SUCCESS;
+      }
+      break;
+      case C_AFTER:
+      {
+        result->res.g.tpl_idx = (result->res.g.n_tuple - 1) * result->col_cnt;
+        *c_pos = C_ON;
+        retval = DB_CURSOR_SUCCESS;
+      }
+      break;
+      default:
+        retval = ER_QPROC_UNKNOWN_CRSPOS;
+        er_set(ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_QPROC_UNKNOWN_CRSPOS, 0);
+        break;
+      }
+    }
+  }
+  break;
+#endif
+  default:
+    retval = ER_QPROC_INVALID_RESTYPE;
+    er_set(ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_QPROC_INVALID_RESTYPE, 0);
+    break;
+  }
 
   return (retval);
 }
@@ -2405,61 +2384,60 @@ db_query_prev_tuple (DB_QUERY_RESULT * result)
  * return : error code or cursor
  * result(in/out): Pointer to the query result structure
  */
-int
-db_query_first_tuple (DB_QUERY_RESULT * result)
+int db_query_first_tuple(DB_QUERY_RESULT *result)
 {
   int retval;
-  CHECK_CONNECT_ERROR ();
+  CHECK_CONNECT_ERROR();
 
-  CHECK_1ARG_ERROR (result);
+  CHECK_1ARG_ERROR(result);
 
   if (result->status == T_CLOSED)
-    {
-      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_QPROC_OPR_ON_CLOSED_QRES, 0);
-      return ER_QPROC_OPR_ON_CLOSED_QRES;
-    }
+  {
+    er_set(ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_QPROC_OPR_ON_CLOSED_QRES, 0);
+    return ER_QPROC_OPR_ON_CLOSED_QRES;
+  }
 
   switch (result->type)
+  {
+  case T_SELECT:
+    retval = cursor_first_tuple(&result->res.s.cursor_id);
+    break;
+
+  case T_CALL:
+  {
+    result->res.c.crs_pos = C_ON;
+    retval = DB_CURSOR_SUCCESS;
+  }
+  break;
+
+  case T_OBJFETCH:
+  {
+    result->res.o.crs_pos = C_ON;
+    retval = DB_CURSOR_SUCCESS;
+  }
+  break;
+
+#if defined(ENABLE_UNUSED_FUNCTION)
+  case T_GET:
+    if (result->res.g.n_tuple == 0)
     {
-    case T_SELECT:
-      retval = cursor_first_tuple (&result->res.s.cursor_id);
-      break;
-
-    case T_CALL:
-      {
-	result->res.c.crs_pos = C_ON;
-	retval = DB_CURSOR_SUCCESS;
-      }
-      break;
-
-    case T_OBJFETCH:
-      {
-	result->res.o.crs_pos = C_ON;
-	retval = DB_CURSOR_SUCCESS;
-      }
-      break;
-
-#if defined (ENABLE_UNUSED_FUNCTION)
-    case T_GET:
-      if (result->res.g.n_tuple == 0)
-	{
-	  retval = DB_CURSOR_END;
-	}
-      else
-	{
-	  result->res.g.tpl_idx = 0;
-	  result->res.g.crs_pos = C_ON;
-	  retval = DB_CURSOR_SUCCESS;
-	}
-      break;
-#endif
-    default:
-      {
-	retval = ER_QPROC_INVALID_RESTYPE;
-	er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_QPROC_INVALID_RESTYPE, 0);
-      }
-      break;
+      retval = DB_CURSOR_END;
     }
+    else
+    {
+      result->res.g.tpl_idx = 0;
+      result->res.g.crs_pos = C_ON;
+      retval = DB_CURSOR_SUCCESS;
+    }
+    break;
+#endif
+  default:
+  {
+    retval = ER_QPROC_INVALID_RESTYPE;
+    er_set(ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_QPROC_INVALID_RESTYPE, 0);
+  }
+  break;
+  }
 
   return (retval);
 }
@@ -2470,59 +2448,58 @@ db_query_first_tuple (DB_QUERY_RESULT * result)
  * return : error code or cursor
  * result(in/out): Pointer to the query result structure
  */
-int
-db_query_last_tuple (DB_QUERY_RESULT * result)
+int db_query_last_tuple(DB_QUERY_RESULT *result)
 {
   int retval;
-  CHECK_CONNECT_ERROR ();
+  CHECK_CONNECT_ERROR();
 
-  CHECK_1ARG_ERROR (result);
+  CHECK_1ARG_ERROR(result);
 
   if (result->status == T_CLOSED)
-    {
-      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_QPROC_OPR_ON_CLOSED_QRES, 0);
-      return ER_QPROC_OPR_ON_CLOSED_QRES;
-    }
+  {
+    er_set(ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_QPROC_OPR_ON_CLOSED_QRES, 0);
+    return ER_QPROC_OPR_ON_CLOSED_QRES;
+  }
 
   switch (result->type)
+  {
+  case T_SELECT:
+    retval = cursor_last_tuple(&result->res.s.cursor_id);
+    break;
+
+  case T_CALL:
+  {
+    result->res.c.crs_pos = C_ON;
+    retval = DB_CURSOR_SUCCESS;
+  }
+  break;
+
+  case T_OBJFETCH:
+  {
+    result->res.o.crs_pos = C_ON;
+    retval = DB_CURSOR_SUCCESS;
+  }
+  break;
+
+#if defined(ENABLE_UNUSED_FUNCTION)
+  case T_GET:
+    if (result->res.g.n_tuple == 0)
     {
-    case T_SELECT:
-      retval = cursor_last_tuple (&result->res.s.cursor_id);
-      break;
-
-    case T_CALL:
-      {
-	result->res.c.crs_pos = C_ON;
-	retval = DB_CURSOR_SUCCESS;
-      }
-      break;
-
-    case T_OBJFETCH:
-      {
-	result->res.o.crs_pos = C_ON;
-	retval = DB_CURSOR_SUCCESS;
-      }
-      break;
-
-#if defined (ENABLE_UNUSED_FUNCTION)
-    case T_GET:
-      if (result->res.g.n_tuple == 0)
-	{
-	  retval = DB_CURSOR_END;
-	}
-      else
-	{
-	  result->res.g.crs_pos = C_ON;
-	  result->res.g.tpl_idx = (result->res.g.n_tuple - 1) * result->col_cnt;
-	  retval = DB_CURSOR_SUCCESS;
-	}
-      break;
-#endif
-    default:
-      retval = ER_QPROC_INVALID_RESTYPE;
-      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_QPROC_INVALID_RESTYPE, 0);
-      break;
+      retval = DB_CURSOR_END;
     }
+    else
+    {
+      result->res.g.crs_pos = C_ON;
+      result->res.g.tpl_idx = (result->res.g.n_tuple - 1) * result->col_cnt;
+      retval = DB_CURSOR_SUCCESS;
+    }
+    break;
+#endif
+  default:
+    retval = ER_QPROC_INVALID_RESTYPE;
+    er_set(ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_QPROC_INVALID_RESTYPE, 0);
+    break;
+  }
 
   return (retval);
 }
@@ -2551,8 +2528,7 @@ db_query_last_tuple (DB_QUERY_RESULT * result)
  * offset(in): Offset tuple count
  * seek_mode(in): Tuple seek mode
  */
-int
-db_query_seek_tuple (DB_QUERY_RESULT * result, int offset, int seek_mode)
+int db_query_seek_tuple(DB_QUERY_RESULT *result, int offset, int seek_mode)
 {
   int scan;
   int rel1, rel2, rel3, rel_n;
@@ -2560,269 +2536,270 @@ db_query_seek_tuple (DB_QUERY_RESULT * result, int offset, int seek_mode)
   DB_QUERY_TPLPOS *tplpos;
   CURSOR_POSITION *c_pos;
 
-  CHECK_CONNECT_ERROR ();
-  CHECK_1ARG_ERROR (result);
+  CHECK_CONNECT_ERROR();
+  CHECK_1ARG_ERROR(result);
 
   if (result->status == T_CLOSED)
-    {
-      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_QPROC_OPR_ON_CLOSED_QRES, 0);
-      return ER_QPROC_OPR_ON_CLOSED_QRES;
-    }
+  {
+    er_set(ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_QPROC_OPR_ON_CLOSED_QRES, 0);
+    return ER_QPROC_OPR_ON_CLOSED_QRES;
+  }
 
   switch (result->type)
+  {
+  case T_SELECT:
+  {
+    tplpos = db_query_get_tplpos(result);
+    if (tplpos == NULL)
     {
-    case T_SELECT:
-      {
-	tplpos = db_query_get_tplpos (result);
-	if (tplpos == NULL)
-	  {
-	    assert (er_errid () != NO_ERROR);
-	    return er_errid ();
-	  }
-
-	/* find the optimal relative position for the scan: relative to the beginning, current tuple position or end. */
-	curr_tplno = result->res.s.cursor_id.tuple_no;
-
-	// TODO: list_id.tuple_cnt could have over INT_MAX. But higher layers (CAS function, API, etc) that use this function are not supporting INT64 range.
-	// To support results beyond the int range, offset and tuple count have be extended to INT64 types
-	assert (result->res.s.cursor_id.list_id.tuple_cnt <= INT_MAX);
-
-	tpl_cnt = MIN (result->res.s.cursor_id.list_id.tuple_cnt, INT_MAX);
-	switch (seek_mode)
-	  {
-	  case DB_CURSOR_SEEK_SET:
-	    {
-	      rel1 = offset;	/* relative to beginning */
-	      rel2 = offset - curr_tplno;	/* relative to current tuple */
-	      rel3 = offset - (tpl_cnt - 1);	/* relative to end */
-	    }
-	    break;
-
-	  case DB_CURSOR_SEEK_CUR:
-	    {
-	      rel1 = curr_tplno + offset;
-	      rel2 = offset;
-	      rel3 = (curr_tplno + offset) - (tpl_cnt - 1);
-	    }
-	    break;
-
-	  case DB_CURSOR_SEEK_END:
-	    {
-	      rel1 = (tpl_cnt - 1) + offset;
-	      rel2 = (tpl_cnt - 1) + offset - curr_tplno;
-	      rel3 = offset;
-	    }
-	    break;
-
-	  default:
-	    {
-	      db_query_set_tplpos (result, tplpos);
-	      db_query_free_tplpos (tplpos);
-	      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_GENERIC_ERROR, 1);
-	    }
-	    return ER_GENERIC_ERROR;
-	  }
-
-	if (abs (rel1) < abs (rel2) && abs (rel1) < abs (rel3))
-	  {
-	    /* move relative to the beginning */
-	    scan = db_query_first_tuple (result);
-	    if (scan != DB_CURSOR_SUCCESS)
-	      {
-		if (scan != DB_CURSOR_END)
-		  {
-		    db_query_set_tplpos (result, tplpos);
-		  }
-		db_query_free_tplpos (tplpos);
-		if (scan != DB_CURSOR_END)
-		  {
-		    assert (er_errid () != NO_ERROR);
-		    return er_errid ();
-		  }
-		else
-		  {
-		    return scan;
-		  }
-	      }
-	    rel_n = rel1;
-	  }
-	else if (abs (rel3) < abs (rel2))
-	  {
-	    /* move relative to the last */
-	    scan = db_query_last_tuple (result);
-	    if (scan != DB_CURSOR_SUCCESS)
-	      {
-		if (scan != DB_CURSOR_END)
-		  {
-		    db_query_set_tplpos (result, tplpos);
-		  }
-		db_query_free_tplpos (tplpos);
-		if (scan != DB_CURSOR_END)
-		  {
-		    assert (er_errid () != NO_ERROR);
-		    return er_errid ();
-		  }
-		else
-		  {
-		    return scan;
-		  }
-	      }
-	    rel_n = rel3;
-	  }
-	else
-	  {
-	    /* move relative to the current tuple */
-	    rel_n = rel2;
-	  }
-
-	/* perform the actual scan operation in a relative manner */
-	if (rel_n > 0)
-	  {
-	    while (rel_n--)
-	      {
-		scan = db_query_next_tuple (result);
-		if (scan != DB_CURSOR_SUCCESS)
-		  {
-		    if (scan != DB_CURSOR_END)
-		      {
-			db_query_set_tplpos (result, tplpos);
-		      }
-		    db_query_free_tplpos (tplpos);
-		    if (scan != DB_CURSOR_END)
-		      {
-			assert (er_errid () != NO_ERROR);
-			return er_errid ();
-		      }
-		    else
-		      {
-			return scan;
-		      }
-		  }
-	      }
-	  }
-	else
-	  {
-	    while (rel_n++)
-	      {
-		scan = db_query_prev_tuple (result);
-		if (scan != DB_CURSOR_SUCCESS)
-		  {
-		    if (scan != DB_CURSOR_END)
-		      {
-			db_query_set_tplpos (result, tplpos);
-		      }
-		    db_query_free_tplpos (tplpos);
-		    if (scan != DB_CURSOR_END)
-		      {
-			assert (er_errid () != NO_ERROR);
-			return er_errid ();
-		      }
-		    else
-		      {
-			return scan;
-		      }
-		  }
-	      }
-	  }
-	db_query_free_tplpos (tplpos);
-      }
-      break;
-
-    case T_CALL:
-    case T_OBJFETCH:
-      switch (seek_mode)
-	{
-	case DB_CURSOR_SEEK_SET:
-	case DB_CURSOR_SEEK_END:
-	  c_pos = ((result->type == T_CALL)
-		   ? (CURSOR_POSITION *) (&result->res.c.crs_pos) : (CURSOR_POSITION *) (&result->res.o.crs_pos));
-	  if (offset == 0)
-	    {
-	      *c_pos = C_ON;
-	      return DB_CURSOR_SUCCESS;
-	    }
-	  else if (offset > 0)
-	    {
-	      *c_pos = C_AFTER;
-	      return DB_CURSOR_END;
-	    }
-	  else
-	    {
-	      *c_pos = C_BEFORE;
-	      return DB_CURSOR_END;
-	    }
-
-	case DB_CURSOR_SEEK_CUR:
-	  if (offset > 0)
-	    {
-	      return db_query_next_tuple (result);
-	    }
-	  else if (offset < 0)
-	    {
-	      return db_query_prev_tuple (result);
-	    }
-	  else
-	    {
-	      return DB_CURSOR_SUCCESS;
-	    }
-
-	default:
-	  er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_GENERIC_ERROR, 1);
-	  return ER_GENERIC_ERROR;
-	}
-
-#if defined (ENABLE_UNUSED_FUNCTION)
-    case T_GET:
-      {
-	int col_cnt, tpl_idx, n_tuple, index = 0;
-
-	col_cnt = result->col_cnt;
-	tpl_idx = result->res.g.tpl_idx;
-	n_tuple = result->res.g.n_tuple;
-
-	if (n_tuple == 0)
-	  {
-	    return DB_CURSOR_END;
-	  }
-	else
-	  {
-	    switch (seek_mode)
-	      {
-	      case DB_CURSOR_SEEK_SET:
-		index = offset * col_cnt;
-		break;
-	      case DB_CURSOR_SEEK_CUR:
-		index = tpl_idx + (offset * col_cnt);
-		break;
-	      case DB_CURSOR_SEEK_END:
-		index = ((n_tuple - 1) + offset) * col_cnt;
-		break;
-	      }
-
-	    if (index < 0)
-	      {
-		result->res.g.crs_pos = C_BEFORE;
-		return DB_CURSOR_END;
-	      }
-	    else if (index >= (n_tuple * col_cnt))
-	      {
-		result->res.g.crs_pos = C_AFTER;
-		return DB_CURSOR_END;
-	      }
-	    else
-	      {
-		result->res.g.tpl_idx = index;
-		result->res.g.crs_pos = C_ON;
-		return DB_CURSOR_SUCCESS;
-	      }
-	  }
-      }
-      break;
-#endif
-    default:
-      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_QPROC_INVALID_RESTYPE, 0);
-      return ER_QPROC_INVALID_RESTYPE;
+      assert(er_errid() != NO_ERROR);
+      return er_errid();
     }
+
+    /* find the optimal relative position for the scan: relative to the beginning, current tuple position or end. */
+    curr_tplno = result->res.s.cursor_id.tuple_no;
+
+    // TODO: list_id.tuple_cnt could have over INT_MAX. But higher layers (CAS function, API, etc) that use this function are not supporting INT64 range.
+    // To support results beyond the int range, offset and tuple count have be extended to INT64 types
+    assert(result->res.s.cursor_id.list_id.tuple_cnt <= INT_MAX);
+
+    tpl_cnt = MIN(result->res.s.cursor_id.list_id.tuple_cnt, INT_MAX);
+    switch (seek_mode)
+    {
+    case DB_CURSOR_SEEK_SET:
+    {
+      rel1 = offset;                 /* relative to beginning */
+      rel2 = offset - curr_tplno;    /* relative to current tuple */
+      rel3 = offset - (tpl_cnt - 1); /* relative to end */
+    }
+    break;
+
+    case DB_CURSOR_SEEK_CUR:
+    {
+      rel1 = curr_tplno + offset;
+      rel2 = offset;
+      rel3 = (curr_tplno + offset) - (tpl_cnt - 1);
+    }
+    break;
+
+    case DB_CURSOR_SEEK_END:
+    {
+      rel1 = (tpl_cnt - 1) + offset;
+      rel2 = (tpl_cnt - 1) + offset - curr_tplno;
+      rel3 = offset;
+    }
+    break;
+
+    default:
+    {
+      db_query_set_tplpos(result, tplpos);
+      db_query_free_tplpos(tplpos);
+      er_set(ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_GENERIC_ERROR, 1);
+    }
+      return ER_GENERIC_ERROR;
+    }
+
+    if (abs(rel1) < abs(rel2) && abs(rel1) < abs(rel3))
+    {
+      /* move relative to the beginning */
+      scan = db_query_first_tuple(result);
+      if (scan != DB_CURSOR_SUCCESS)
+      {
+        if (scan != DB_CURSOR_END)
+        {
+          db_query_set_tplpos(result, tplpos);
+        }
+        db_query_free_tplpos(tplpos);
+        if (scan != DB_CURSOR_END)
+        {
+          assert(er_errid() != NO_ERROR);
+          return er_errid();
+        }
+        else
+        {
+          return scan;
+        }
+      }
+      rel_n = rel1;
+    }
+    else if (abs(rel3) < abs(rel2))
+    {
+      /* move relative to the last */
+      scan = db_query_last_tuple(result);
+      if (scan != DB_CURSOR_SUCCESS)
+      {
+        if (scan != DB_CURSOR_END)
+        {
+          db_query_set_tplpos(result, tplpos);
+        }
+        db_query_free_tplpos(tplpos);
+        if (scan != DB_CURSOR_END)
+        {
+          assert(er_errid() != NO_ERROR);
+          return er_errid();
+        }
+        else
+        {
+          return scan;
+        }
+      }
+      rel_n = rel3;
+    }
+    else
+    {
+      /* move relative to the current tuple */
+      rel_n = rel2;
+    }
+
+    /* perform the actual scan operation in a relative manner */
+    if (rel_n > 0)
+    {
+      while (rel_n--)
+      {
+        scan = db_query_next_tuple(result);
+        if (scan != DB_CURSOR_SUCCESS)
+        {
+          if (scan != DB_CURSOR_END)
+          {
+            db_query_set_tplpos(result, tplpos);
+          }
+          db_query_free_tplpos(tplpos);
+          if (scan != DB_CURSOR_END)
+          {
+            assert(er_errid() != NO_ERROR);
+            return er_errid();
+          }
+          else
+          {
+            return scan;
+          }
+        }
+      }
+    }
+    else
+    {
+      while (rel_n++)
+      {
+        scan = db_query_prev_tuple(result);
+        if (scan != DB_CURSOR_SUCCESS)
+        {
+          if (scan != DB_CURSOR_END)
+          {
+            db_query_set_tplpos(result, tplpos);
+          }
+          db_query_free_tplpos(tplpos);
+          if (scan != DB_CURSOR_END)
+          {
+            assert(er_errid() != NO_ERROR);
+            return er_errid();
+          }
+          else
+          {
+            return scan;
+          }
+        }
+      }
+    }
+    db_query_free_tplpos(tplpos);
+  }
+  break;
+
+  case T_CALL:
+  case T_OBJFETCH:
+    switch (seek_mode)
+    {
+    case DB_CURSOR_SEEK_SET:
+    case DB_CURSOR_SEEK_END:
+      c_pos = ((result->type == T_CALL)
+                   ? (CURSOR_POSITION *)(&result->res.c.crs_pos)
+                   : (CURSOR_POSITION *)(&result->res.o.crs_pos));
+      if (offset == 0)
+      {
+        *c_pos = C_ON;
+        return DB_CURSOR_SUCCESS;
+      }
+      else if (offset > 0)
+      {
+        *c_pos = C_AFTER;
+        return DB_CURSOR_END;
+      }
+      else
+      {
+        *c_pos = C_BEFORE;
+        return DB_CURSOR_END;
+      }
+
+    case DB_CURSOR_SEEK_CUR:
+      if (offset > 0)
+      {
+        return db_query_next_tuple(result);
+      }
+      else if (offset < 0)
+      {
+        return db_query_prev_tuple(result);
+      }
+      else
+      {
+        return DB_CURSOR_SUCCESS;
+      }
+
+    default:
+      er_set(ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_GENERIC_ERROR, 1);
+      return ER_GENERIC_ERROR;
+    }
+
+#if defined(ENABLE_UNUSED_FUNCTION)
+  case T_GET:
+  {
+    int col_cnt, tpl_idx, n_tuple, index = 0;
+
+    col_cnt = result->col_cnt;
+    tpl_idx = result->res.g.tpl_idx;
+    n_tuple = result->res.g.n_tuple;
+
+    if (n_tuple == 0)
+    {
+      return DB_CURSOR_END;
+    }
+    else
+    {
+      switch (seek_mode)
+      {
+      case DB_CURSOR_SEEK_SET:
+        index = offset * col_cnt;
+        break;
+      case DB_CURSOR_SEEK_CUR:
+        index = tpl_idx + (offset * col_cnt);
+        break;
+      case DB_CURSOR_SEEK_END:
+        index = ((n_tuple - 1) + offset) * col_cnt;
+        break;
+      }
+
+      if (index < 0)
+      {
+        result->res.g.crs_pos = C_BEFORE;
+        return DB_CURSOR_END;
+      }
+      else if (index >= (n_tuple * col_cnt))
+      {
+        result->res.g.crs_pos = C_AFTER;
+        return DB_CURSOR_END;
+      }
+      else
+      {
+        result->res.g.tpl_idx = index;
+        result->res.g.crs_pos = C_ON;
+        return DB_CURSOR_SUCCESS;
+      }
+    }
+  }
+  break;
+#endif
+  default:
+    er_set(ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_QPROC_INVALID_RESTYPE, 0);
+    return ER_QPROC_INVALID_RESTYPE;
+  }
 
   return DB_CURSOR_SUCCESS;
 }
@@ -2839,57 +2816,57 @@ db_query_seek_tuple (DB_QUERY_RESULT * result, int offset, int seek_mode)
  *       faster way of accessing a specific tuple.
  */
 DB_QUERY_TPLPOS *
-db_query_get_tplpos (DB_QUERY_RESULT * result)
+db_query_get_tplpos(DB_QUERY_RESULT *result)
 {
   DB_QUERY_TPLPOS *tplpos;
 
-  CHECK_CONNECT_NULL ();
+  CHECK_CONNECT_NULL();
 
-  CHECK_1ARG_NULL (result);
+  CHECK_1ARG_NULL(result);
 
   if (result->status == T_CLOSED)
-    {
-      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_QPROC_OPR_ON_CLOSED_QRES, 0);
-      return NULL;
-    }
+  {
+    er_set(ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_QPROC_OPR_ON_CLOSED_QRES, 0);
+    return NULL;
+  }
 
-  tplpos = (DB_QUERY_TPLPOS *) malloc (DB_SIZEOF (DB_QUERY_TPLPOS));
+  tplpos = (DB_QUERY_TPLPOS *)malloc(DB_SIZEOF(DB_QUERY_TPLPOS));
   if (tplpos == NULL)
-    {
-      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_OUT_OF_VIRTUAL_MEMORY, 1, DB_SIZEOF (DB_QUERY_TPLPOS));
-      return NULL;
-    }
+  {
+    er_set(ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_OUT_OF_VIRTUAL_MEMORY, 1, DB_SIZEOF(DB_QUERY_TPLPOS));
+    return NULL;
+  }
 
   switch (result->type)
-    {
-    case T_SELECT:
-      tplpos->crs_pos = result->res.s.cursor_id.position;
-      tplpos->vpid.pageid = result->res.s.cursor_id.current_vpid.pageid;
-      tplpos->vpid.volid = result->res.s.cursor_id.current_vpid.volid;
-      tplpos->tpl_no = result->res.s.cursor_id.current_tuple_no;
-      tplpos->tpl_off = result->res.s.cursor_id.current_tuple_offset;
-      break;
+  {
+  case T_SELECT:
+    tplpos->crs_pos = result->res.s.cursor_id.position;
+    tplpos->vpid.pageid = result->res.s.cursor_id.current_vpid.pageid;
+    tplpos->vpid.volid = result->res.s.cursor_id.current_vpid.volid;
+    tplpos->tpl_no = result->res.s.cursor_id.current_tuple_no;
+    tplpos->tpl_off = result->res.s.cursor_id.current_tuple_offset;
+    break;
 
-    case T_CALL:
-      tplpos->crs_pos = result->res.c.crs_pos;
-      break;
+  case T_CALL:
+    tplpos->crs_pos = result->res.c.crs_pos;
+    break;
 
-    case T_OBJFETCH:
-      tplpos->crs_pos = result->res.o.crs_pos;
-      break;
+  case T_OBJFETCH:
+    tplpos->crs_pos = result->res.o.crs_pos;
+    break;
 
-#if defined (ENABLE_UNUSED_FUNCTION)
-    case T_GET:
-      tplpos->crs_pos = result->res.g.crs_pos;
-      tplpos->tpl_off = result->res.g.tpl_idx / result->col_cnt;
-      tplpos->tpl_no = result->res.g.n_tuple;
-      break;
+#if defined(ENABLE_UNUSED_FUNCTION)
+  case T_GET:
+    tplpos->crs_pos = result->res.g.crs_pos;
+    tplpos->tpl_off = result->res.g.tpl_idx / result->col_cnt;
+    tplpos->tpl_no = result->res.g.n_tuple;
+    break;
 #endif
-    default:
-      free_and_init (tplpos);
-      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_QPROC_INVALID_RESTYPE, 0);
-      return NULL;
-    }
+  default:
+    free_and_init(tplpos);
+    er_set(ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_QPROC_INVALID_RESTYPE, 0);
+    return NULL;
+  }
 
   return tplpos;
 }
@@ -2901,54 +2878,51 @@ db_query_get_tplpos (DB_QUERY_RESULT * result)
  * result(in): query result structure
  * tplpos(out): tuple position information
  */
-int
-db_query_set_tplpos (DB_QUERY_RESULT * result, DB_QUERY_TPLPOS * tplpos)
+int db_query_set_tplpos(DB_QUERY_RESULT *result, DB_QUERY_TPLPOS *tplpos)
 {
-  CHECK_1ARG_ERROR (result);
+  CHECK_1ARG_ERROR(result);
 
   if (result->status == T_CLOSED)
-    {
-      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_QPROC_OPR_ON_CLOSED_QRES, 0);
-      return ER_QPROC_OPR_ON_CLOSED_QRES;
-    }
+  {
+    er_set(ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_QPROC_OPR_ON_CLOSED_QRES, 0);
+    return ER_QPROC_OPR_ON_CLOSED_QRES;
+  }
 
   switch (result->type)
+  {
+  case T_SELECT:
+    /* reset cursor identifier */
+    if (result->res.s.cursor_id.current_vpid.pageid != tplpos->vpid.pageid || result->res.s.cursor_id.current_vpid.volid != tplpos->vpid.volid)
     {
-    case T_SELECT:
-      /* reset cursor identifier */
-      if (result->res.s.cursor_id.current_vpid.pageid != tplpos->vpid.pageid
-	  || result->res.s.cursor_id.current_vpid.volid != tplpos->vpid.volid)
-	{
-	  /* needs to get another page */
-	  if (cursor_fetch_page_having_tuple (&result->res.s.cursor_id, &tplpos->vpid, tplpos->tpl_no, tplpos->tpl_off)
-	      != NO_ERROR)
-	    {
-	      return ER_FAILED;
-	    }
-	  result->res.s.cursor_id.current_vpid = tplpos->vpid;
-	}
-      result->res.s.cursor_id.position = tplpos->crs_pos;
-      break;
-
-    case T_CALL:
-      result->res.c.crs_pos = tplpos->crs_pos;
-      break;
-
-    case T_OBJFETCH:
-      result->res.o.crs_pos = tplpos->crs_pos;
-      break;
-
-#if defined (ENABLE_UNUSED_FUNCTION)
-    case T_GET:
-      result->res.g.crs_pos = tplpos->crs_pos;
-      result->res.g.tpl_idx = tplpos->tpl_off * result->col_cnt;
-      result->res.g.n_tuple = tplpos->tpl_no;
-      break;
-#endif
-    default:
-      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_QPROC_INVALID_RESTYPE, 0);
-      return ER_QPROC_INVALID_RESTYPE;
+      /* needs to get another page */
+      if (cursor_fetch_page_having_tuple(&result->res.s.cursor_id, &tplpos->vpid, tplpos->tpl_no, tplpos->tpl_off) != NO_ERROR)
+      {
+        return ER_FAILED;
+      }
+      result->res.s.cursor_id.current_vpid = tplpos->vpid;
     }
+    result->res.s.cursor_id.position = tplpos->crs_pos;
+    break;
+
+  case T_CALL:
+    result->res.c.crs_pos = tplpos->crs_pos;
+    break;
+
+  case T_OBJFETCH:
+    result->res.o.crs_pos = tplpos->crs_pos;
+    break;
+
+#if defined(ENABLE_UNUSED_FUNCTION)
+  case T_GET:
+    result->res.g.crs_pos = tplpos->crs_pos;
+    result->res.g.tpl_idx = tplpos->tpl_off * result->col_cnt;
+    result->res.g.n_tuple = tplpos->tpl_no;
+    break;
+#endif
+  default:
+    er_set(ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_QPROC_INVALID_RESTYPE, 0);
+    return ER_QPROC_INVALID_RESTYPE;
+  }
 
   return NO_ERROR;
 }
@@ -2959,10 +2933,9 @@ db_query_set_tplpos (DB_QUERY_RESULT * result, DB_QUERY_TPLPOS * tplpos)
  * return : void
  * tplpos(in): Tuple position information
  */
-void
-db_query_free_tplpos (DB_QUERY_TPLPOS * tplpos)
+void db_query_free_tplpos(DB_QUERY_TPLPOS *tplpos)
 {
-  free_and_init (tplpos);
+  free_and_init(tplpos);
 }
 
 /*
@@ -2974,78 +2947,77 @@ db_query_free_tplpos (DB_QUERY_TPLPOS * tplpos)
  * index(in): position of the tuple value of interest (0 for the first one)
  * value(out): value container for column value
  */
-int
-db_query_get_tuple_value (DB_QUERY_RESULT * result, int index, DB_VALUE * value)
+int db_query_get_tuple_value(DB_QUERY_RESULT *result, int index, DB_VALUE *value)
 {
   int retval;
   DB_VALUE *valp;
-#if defined (ENABLE_UNUSED_FUNCTION)
+#if defined(ENABLE_UNUSED_FUNCTION)
   int current;
 #endif
 
-  CHECK_CONNECT_ERROR ();
+  CHECK_CONNECT_ERROR();
 
-  CHECK_2ARGS_ERROR (result, value);
+  CHECK_2ARGS_ERROR(result, value);
 
   if (result->status == T_CLOSED)
-    {
-      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_QPROC_OPR_ON_CLOSED_QRES, 0);
-      return ER_QPROC_OPR_ON_CLOSED_QRES;
-    }
+  {
+    er_set(ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_QPROC_OPR_ON_CLOSED_QRES, 0);
+    return ER_QPROC_OPR_ON_CLOSED_QRES;
+  }
 
   switch (result->type)
+  {
+  case T_SELECT:
+    if (DB_INVALID_INDEX(DB_OID_INCLUDED(result) ? index + 1 : index, result->col_cnt))
     {
-    case T_SELECT:
-      if (DB_INVALID_INDEX (DB_OID_INCLUDED (result) ? index + 1 : index, result->col_cnt))
-	{
-	  er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_QPROC_INVALID_TPLVAL_INDEX, 1,
-		  DB_OID_INCLUDED (result) ? index + 1 : index);
-	  return ER_QPROC_INVALID_TPLVAL_INDEX;
-	}
+      er_set(ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_QPROC_INVALID_TPLVAL_INDEX, 1,
+             DB_OID_INCLUDED(result) ? index + 1 : index);
+      return ER_QPROC_INVALID_TPLVAL_INDEX;
+    }
 
-      retval = cursor_get_tuple_value (&result->res.s.cursor_id, index, value);
-      break;
+    retval = cursor_get_tuple_value(&result->res.s.cursor_id, index, value);
+    break;
 
-    case T_OBJFETCH:
-      if (DB_OID_INCLUDED (result))
-	{
-	  index++;
-	}
-      if (DB_INVALID_INDEX (index, result->col_cnt))
-	{
-	  er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_QPROC_INVALID_TPLVAL_INDEX, 1, index);
-	  return ER_QPROC_INVALID_TPLVAL_INDEX;
-	}
-      valp = result->res.o.valptr_list[index];
-      pr_clone_value (valp, value);
-      retval = NO_ERROR;
-      break;
+  case T_OBJFETCH:
+    if (DB_OID_INCLUDED(result))
+    {
+      index++;
+    }
+    if (DB_INVALID_INDEX(index, result->col_cnt))
+    {
+      er_set(ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_QPROC_INVALID_TPLVAL_INDEX, 1, index);
+      return ER_QPROC_INVALID_TPLVAL_INDEX;
+    }
+    valp = result->res.o.valptr_list[index];
+    pr_clone_value(valp, value);
+    retval = NO_ERROR;
+    break;
 
-    case T_CALL:
-      valp = result->res.c.val_ptr;
-      pr_clone_value (valp, value);
-      retval = NO_ERROR;
-      break;
+  case T_CALL:
+    valp = result->res.c.val_ptr;
+    pr_clone_value(valp, value);
+    retval = NO_ERROR;
+    break;
 
-#if defined (ENABLE_UNUSED_FUNCTION)
-    case T_GET:
-      if (DB_INVALID_INDEX (index, result->col_cnt))
-	{
-	  retval = ER_QPROC_INVALID_TPLVAL_INDEX;
-	  er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_QPROC_INVALID_TPLVAL_INDEX, 1, index);
-	  break;
-	}
-      current = result->res.g.tpl_idx;
-      valp = &result->res.g.tpl_list[current + index];
-      pr_clone_value (valp, value);
-      retval = NO_ERROR;
-      break;
-#endif
-    default:
-      retval = ER_QPROC_INVALID_RESTYPE;
-      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_QPROC_INVALID_RESTYPE, 0);
+#if defined(ENABLE_UNUSED_FUNCTION)
+  case T_GET:
+    if (DB_INVALID_INDEX(index, result->col_cnt))
+    {
+      retval = ER_QPROC_INVALID_TPLVAL_INDEX;
+      er_set(ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_QPROC_INVALID_TPLVAL_INDEX, 1, index);
       break;
     }
+    current = result->res.g.tpl_idx;
+    valp = &result->res.g.tpl_list[current + index];
+    pr_clone_value(valp, value);
+    retval = NO_ERROR;
+    break;
+#endif
+  default:
+    retval = ER_QPROC_INVALID_RESTYPE;
+    er_set(ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_QPROC_INVALID_RESTYPE, 0);
+    break;
+  }
 
   return (retval);
 }
@@ -3060,57 +3032,56 @@ db_query_get_tuple_value (DB_QUERY_RESULT * result, int index, DB_VALUE * value)
  * column_name(in): name of the desired column
  * value(out): value container for column value
  */
-int
-db_query_get_tuple_value_by_name (DB_QUERY_RESULT * result, char *column_name, DB_VALUE * value)
+int db_query_get_tuple_value_by_name(DB_QUERY_RESULT *result, char *column_name, DB_VALUE *value)
 {
   int retval;
   DB_QUERY_TYPE *typep;
   int ind;
 
-  CHECK_CONNECT_ERROR ();
-  CHECK_3ARGS_ERROR (result, column_name, value);
+  CHECK_CONNECT_ERROR();
+  CHECK_3ARGS_ERROR(result, column_name, value);
 
   if (result->status == T_CLOSED)
-    {
-      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_QPROC_OPR_ON_CLOSED_QRES, 0);
-      return ER_QPROC_OPR_ON_CLOSED_QRES;
-    }
+  {
+    er_set(ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_QPROC_OPR_ON_CLOSED_QRES, 0);
+    return ER_QPROC_OPR_ON_CLOSED_QRES;
+  }
 
   switch (result->type)
+  {
+  case T_SELECT:
+  case T_OBJFETCH:
+  case T_GET:
+    typep = result->query_type;
+    for (ind = 0; typep; ind++, typep = typep ? typep->next : NULL)
     {
-    case T_SELECT:
-    case T_OBJFETCH:
-    case T_GET:
-      typep = result->query_type;
-      for (ind = 0; typep; ind++, typep = typep ? typep->next : NULL)
-	{
-	  if (!ansisql_strcasecmp (column_name, typep->name))
-	    {
-	      break;
-	    }
-	  else if (typep->original_name)
-	    {			/* retry with original name */
-	      if (!ansisql_strcasecmp (column_name, typep->original_name))
-		{
-		  break;
-		}
-	    }
-	}
-
-      if (typep == NULL)
-	{
-	  er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_QPROC_INVALID_COLNAME, 1, column_name);
-	  return ER_QPROC_INVALID_COLNAME;
-	}
-      retval = db_query_get_tuple_value (result, ind, value);
-      break;
-
-    case T_CALL:
-    default:
-      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_QPROC_INVALID_RESTYPE, 0);
-      return ER_QPROC_INVALID_RESTYPE;
-      break;
+      if (!ansisql_strcasecmp(column_name, typep->name))
+      {
+        break;
+      }
+      else if (typep->original_name)
+      { /* retry with original name */
+        if (!ansisql_strcasecmp(column_name, typep->original_name))
+        {
+          break;
+        }
+      }
     }
+
+    if (typep == NULL)
+    {
+      er_set(ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_QPROC_INVALID_COLNAME, 1, column_name);
+      return ER_QPROC_INVALID_COLNAME;
+    }
+    retval = db_query_get_tuple_value(result, ind, value);
+    break;
+
+  case T_CALL:
+  default:
+    er_set(ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_QPROC_INVALID_RESTYPE, 0);
+    return ER_QPROC_INVALID_RESTYPE;
+    break;
+  }
 
   return (retval);
 }
@@ -3126,57 +3097,56 @@ db_query_get_tuple_value_by_name (DB_QUERY_RESULT * result, char *column_name, D
  * size(in): Number of values in the value list
  * value_list(out): an array of DB_VALUE structures
  */
-int
-db_query_get_tuple_valuelist (DB_QUERY_RESULT * result, int size, DB_VALUE * value_list)
+int db_query_get_tuple_valuelist(DB_QUERY_RESULT *result, int size, DB_VALUE *value_list)
 {
   int retval;
   DB_VALUE *valp;
   int k;
 
-  CHECK_CONNECT_ERROR ();
+  CHECK_CONNECT_ERROR();
 
-  CHECK_2ARGS_ERROR (result, value_list);
+  CHECK_2ARGS_ERROR(result, value_list);
 
   if (result->status == T_CLOSED)
-    {
-      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_QPROC_OPR_ON_CLOSED_QRES, 0);
-      return ER_QPROC_OPR_ON_CLOSED_QRES;
-    }
+  {
+    er_set(ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_QPROC_OPR_ON_CLOSED_QRES, 0);
+    return ER_QPROC_OPR_ON_CLOSED_QRES;
+  }
 
   switch (result->type)
+  {
+  case T_SELECT:
+    if (DB_INVALID_INDEX(DB_OID_INCLUDED(result) ? size : size - 1, result->col_cnt))
     {
-    case T_SELECT:
-      if (DB_INVALID_INDEX (DB_OID_INCLUDED (result) ? size : size - 1, result->col_cnt))
-	{
-	  er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_QPROC_INVALID_TPLVAL_INDEX, 1,
-		  DB_OID_INCLUDED (result) ? size : size - 1);
-	  return ER_QPROC_INVALID_TPLVAL_INDEX;
-	}
-
-      retval = cursor_get_tuple_value_list (&result->res.s.cursor_id, size, value_list);
-      break;
-
-    case T_CALL:
-      retval = db_query_get_tuple_value (result, 0, value_list);
-      break;
-
-    case T_GET:
-    case T_OBJFETCH:
-      for (k = 0, valp = value_list; k < size; k++, valp++)
-	if ((db_query_get_tuple_value (result, k, valp)) < 0)
-	  {
-	    assert (er_errid () != NO_ERROR);
-	    retval = er_errid ();
-	    return (retval);
-	  }
-      retval = NO_ERROR;
-      break;
-
-    default:
-      retval = ER_QPROC_INVALID_RESTYPE;
-      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_QPROC_INVALID_RESTYPE, 0);
-      break;
+      er_set(ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_QPROC_INVALID_TPLVAL_INDEX, 1,
+             DB_OID_INCLUDED(result) ? size : size - 1);
+      return ER_QPROC_INVALID_TPLVAL_INDEX;
     }
+
+    retval = cursor_get_tuple_value_list(&result->res.s.cursor_id, size, value_list);
+    break;
+
+  case T_CALL:
+    retval = db_query_get_tuple_value(result, 0, value_list);
+    break;
+
+  case T_GET:
+  case T_OBJFETCH:
+    for (k = 0, valp = value_list; k < size; k++, valp++)
+      if ((db_query_get_tuple_value(result, k, valp)) < 0)
+      {
+        assert(er_errid() != NO_ERROR);
+        retval = er_errid();
+        return (retval);
+      }
+    retval = NO_ERROR;
+    break;
+
+  default:
+    retval = ER_QPROC_INVALID_RESTYPE;
+    er_set(ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_QPROC_INVALID_RESTYPE, 0);
+    break;
+  }
 
   return (retval);
 }
@@ -3190,43 +3160,42 @@ db_query_get_tuple_valuelist (DB_QUERY_RESULT * result, int size, DB_VALUE * val
  * note : If an error is detected, the function returns -1 and the
  *    db_error_string() function can be used to see a description of the error.
  */
-int
-db_query_tuple_count (DB_QUERY_RESULT * result)
+int db_query_tuple_count(DB_QUERY_RESULT *result)
 {
   int retval;
 
-  CHECK_1ARG_MINUSONE (result);
+  CHECK_1ARG_MINUSONE(result);
 
   if (result->status == T_CLOSED)
-    {
-      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_QPROC_OPR_ON_CLOSED_QRES, 0);
-      return -1;
-    }
+  {
+    er_set(ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_QPROC_OPR_ON_CLOSED_QRES, 0);
+    return -1;
+  }
 
   switch (result->type)
-    {
-    case T_SELECT:
-      // TODO: To support results beyond the int range, offset and tuple count have be extended to INT64 types
-      assert (result->res.s.cursor_id.list_id.tuple_cnt <= INT_MAX);
-      retval = MIN (result->res.s.cursor_id.list_id.tuple_cnt, INT_MAX);
-      break;
+  {
+  case T_SELECT:
+    // TODO: To support results beyond the int range, offset and tuple count have be extended to INT64 types
+    assert(result->res.s.cursor_id.list_id.tuple_cnt <= INT_MAX);
+    retval = MIN(result->res.s.cursor_id.list_id.tuple_cnt, INT_MAX);
+    break;
 
-    case T_CALL:
-    case T_OBJFETCH:
-      retval = 1;
-      break;
+  case T_CALL:
+  case T_OBJFETCH:
+    retval = 1;
+    break;
 
-#if defined (ENABLE_UNUSED_FUNCTION)
-    case T_GET:
-      retval = result->res.g.n_tuple;
-      break;
+#if defined(ENABLE_UNUSED_FUNCTION)
+  case T_GET:
+    retval = result->res.g.n_tuple;
+    break;
 #endif
 
-    default:
-      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_QPROC_INVALID_RESTYPE, 0);
-      retval = -1;
-      break;
-    }
+  default:
+    er_set(ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_QPROC_INVALID_RESTYPE, 0);
+    retval = -1;
+    break;
+  }
 
   return retval;
 }
@@ -3237,57 +3206,55 @@ db_query_tuple_count (DB_QUERY_RESULT * result)
  * return : number of columns.
  * result(in): Pointer to the query result structure
  */
-int
-db_query_column_count (DB_QUERY_RESULT * result)
+int db_query_column_count(DB_QUERY_RESULT *result)
 {
   DB_QUERY_TYPE *t;
   int num_cols = 0;
 
-  CHECK_1ARG_MINUSONE (result);
+  CHECK_1ARG_MINUSONE(result);
 
   if (result->status == T_CLOSED)
-    {
-      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_QPROC_OPR_ON_CLOSED_QRES, 0);
-      return -1;
-    }
+  {
+    er_set(ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_QPROC_OPR_ON_CLOSED_QRES, 0);
+    return -1;
+  }
 
-  if (DB_INVALID_RESTYPE (result->type))
-    {
-      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_QPROC_INVALID_RESTYPE, 0);
-      return -1;
-    }
+  if (DB_INVALID_RESTYPE(result->type))
+  {
+    er_set(ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_QPROC_INVALID_RESTYPE, 0);
+    return -1;
+  }
 
-  for (t = result->query_type; t != NULL; t = db_query_format_next (t))
-    {
-      num_cols++;
-    }
+  for (t = result->query_type; t != NULL; t = db_query_format_next(t))
+  {
+    num_cols++;
+  }
 
   return num_cols;
 }
 
-#if defined(WINDOWS) || defined (ENABLE_UNUSED_FUNCTION)
+#if defined(WINDOWS) || defined(ENABLE_UNUSED_FUNCTION)
 /*
  * db_query_stmt_id() - This function returns the statement identifier for the
  *    query or -1 if the query is not select type.
  * return : statement id or -1
  * result(in): Pointer to the query result structure
  */
-int
-db_query_stmt_id (DB_QUERY_RESULT * result)
+int db_query_stmt_id(DB_QUERY_RESULT *result)
 {
-  CHECK_1ARG_MINUSONE (result);
+  CHECK_1ARG_MINUSONE(result);
 
   if (result->status == T_CLOSED)
-    {
-      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_QPROC_OPR_ON_CLOSED_QRES, 0);
-      return -1;
-    }
+  {
+    er_set(ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_QPROC_OPR_ON_CLOSED_QRES, 0);
+    return -1;
+  }
 
-  if (DB_INVALID_RESTYPE (result->type))
-    {
-      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_QPROC_INVALID_RESTYPE, 0);
-      return -1;
-    }
+  if (DB_INVALID_RESTYPE(result->type))
+  {
+    er_set(ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_QPROC_INVALID_RESTYPE, 0);
+    return -1;
+  }
 
   return result->res.s.stmt_id;
 }
@@ -3306,39 +3273,38 @@ db_query_stmt_id (DB_QUERY_RESULT * result)
  *    db_include_oid(), db_compile_statement() and the db_execute_statement()
  *    functions, or simply by the db_execute_oid() function.
  */
-int
-db_query_get_tuple_oid (DB_QUERY_RESULT * result, DB_VALUE * db_value)
+int db_query_get_tuple_oid(DB_QUERY_RESULT *result, DB_VALUE *db_value)
 {
   int retval;
 
-  CHECK_CONNECT_ERROR ();
+  CHECK_CONNECT_ERROR();
 
-  CHECK_2ARGS_ERROR (result, db_value);
+  CHECK_2ARGS_ERROR(result, db_value);
 
   if (result->status == T_CLOSED)
-    {
-      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_QPROC_OPR_ON_CLOSED_QRES, 0);
-      return ER_QPROC_OPR_ON_CLOSED_QRES;
-    }
+  {
+    er_set(ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_QPROC_OPR_ON_CLOSED_QRES, 0);
+    return ER_QPROC_OPR_ON_CLOSED_QRES;
+  }
 
-  if (DB_INVALID_RESTYPE (result->type))
-    {
-      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_QPROC_INVALID_RESTYPE, 0);
-      return ER_QPROC_INVALID_RESTYPE;
-    }
+  if (DB_INVALID_RESTYPE(result->type))
+  {
+    er_set(ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_QPROC_INVALID_RESTYPE, 0);
+    return ER_QPROC_INVALID_RESTYPE;
+  }
 
-  if (!DB_OID_INCLUDED (result))
-    {
-      er_set (ER_WARNING_SEVERITY, ARG_FILE_LINE, ER_QPROC_INVALID_CRSOPR, 0);
-      return ER_QPROC_INVALID_CRSOPR;
-    }
+  if (!DB_OID_INCLUDED(result))
+  {
+    er_set(ER_WARNING_SEVERITY, ARG_FILE_LINE, ER_QPROC_INVALID_CRSOPR, 0);
+    return ER_QPROC_INVALID_CRSOPR;
+  }
 
-  retval = cursor_get_current_oid (&result->res.s.cursor_id, db_value);
+  retval = cursor_get_current_oid(&result->res.s.cursor_id, db_value);
 
   return (retval);
 }
 
-#if defined(WINDOWS) || defined (ENABLE_UNUSED_FUNCTION)
+#if defined(WINDOWS) || defined(ENABLE_UNUSED_FUNCTION)
 /*
  * db_query_get_value_type() - This function returns the type of the specified
  *    result column, or DB_TYPE_NULL on error
@@ -3347,30 +3313,30 @@ db_query_get_tuple_oid (DB_QUERY_RESULT * result, DB_VALUE * db_value)
  * index(in) : column index
  */
 DB_TYPE
-db_query_get_value_type (DB_QUERY_RESULT * result, int index)
+db_query_get_value_type(DB_QUERY_RESULT *result, int index)
 {
   DB_QUERY_TYPE *typep;
   int k;
 
-  CHECK_1ARG_RETURN_EXPR (result, DB_TYPE_NULL);
+  CHECK_1ARG_RETURN_EXPR(result, DB_TYPE_NULL);
 
   if (result->status == T_CLOSED)
-    {
-      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_QPROC_OPR_ON_CLOSED_QRES, 0);
-      return DB_TYPE_NULL;
-    }
+  {
+    er_set(ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_QPROC_OPR_ON_CLOSED_QRES, 0);
+    return DB_TYPE_NULL;
+  }
 
-  if (DB_INVALID_RESTYPE (result->type))
-    {
-      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_QPROC_INVALID_RESTYPE, 0);
-      return DB_TYPE_NULL;
-    }
+  if (DB_INVALID_RESTYPE(result->type))
+  {
+    er_set(ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_QPROC_INVALID_RESTYPE, 0);
+    return DB_TYPE_NULL;
+  }
 
-  if (DB_INVALID_INDEX (index, result->type_cnt))
-    {
-      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_QPROC_INVALID_TPLVAL_INDEX, 1, index);
-      return DB_TYPE_NULL;
-    }
+  if (DB_INVALID_INDEX(index, result->type_cnt))
+  {
+    er_set(ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_QPROC_INVALID_TPLVAL_INDEX, 1, index);
+    return DB_TYPE_NULL;
+  }
 
   for (k = 0, typep = result->query_type; k < index && typep; k++, typep = typep->next)
 
@@ -3386,42 +3352,41 @@ db_query_get_value_type (DB_QUERY_RESULT * result, int index)
  * result(in) : pointer to query result structure
  * index(in) : which result column
  */
-int
-db_query_get_value_length (DB_QUERY_RESULT * result, int index)
+int db_query_get_value_length(DB_QUERY_RESULT *result, int index)
 {
   DB_QUERY_TYPE *typep;
   int k;
 
-  CHECK_1ARG_MINUSONE (result);
+  CHECK_1ARG_MINUSONE(result);
 
   if (result->status == T_CLOSED)
-    {
-      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_QPROC_OPR_ON_CLOSED_QRES, 0);
-      return -1;
-    }
+  {
+    er_set(ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_QPROC_OPR_ON_CLOSED_QRES, 0);
+    return -1;
+  }
 
-  if (DB_INVALID_RESTYPE (result->type))
-    {
-      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_QPROC_INVALID_RESTYPE, 0);
-      return -1;
-    }
+  if (DB_INVALID_RESTYPE(result->type))
+  {
+    er_set(ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_QPROC_INVALID_RESTYPE, 0);
+    return -1;
+  }
 
-  if (DB_INVALID_INDEX (index, result->type_cnt))
-    {
-      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_QPROC_INVALID_TPLVAL_INDEX, 1, index);
-      return -1;
-    }
+  if (DB_INVALID_INDEX(index, result->type_cnt))
+  {
+    er_set(ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_QPROC_INVALID_TPLVAL_INDEX, 1, index);
+    return -1;
+  }
 
   for (k = 0, typep = result->query_type; k < index; k++, typep = typep->next)
-    {
-      ;				/* NULL */
-    }
+  {
+    ; /* NULL */
+  }
 
   return typep ? typep->size : -1;
 }
 #endif
 
-#if defined(WINDOWS) || defined (CUBRID_DEBUG)
+#if defined(WINDOWS) || defined(CUBRID_DEBUG)
 /*
  * db_sqlx_debug_print_result() - This function displays the result on
  *    standard output.
@@ -3431,30 +3396,28 @@ db_query_get_value_length (DB_QUERY_RESULT * result, int index)
  * note: this function is only for DEBUGGING purpose. No product can use
  *	 this function to display the result.
  */
-void
-db_sqlx_debug_print_result (DB_QUERY_RESULT * result)
+void db_sqlx_debug_print_result(DB_QUERY_RESULT *result)
 {
   if (result == NULL)
-    {
-      fprintf (stdout, "There is no result.\n\n");
-      return;
-    }
+  {
+    fprintf(stdout, "There is no result.\n\n");
+    return;
+  }
 
   switch (result->type)
-    {
-    case T_SELECT:
-      cursor_print_list (result->res.s.query_id, &result->res.s.cursor_id.list_id);
-      break;
+  {
+  case T_SELECT:
+    cursor_print_list(result->res.s.query_id, &result->res.s.cursor_id.list_id);
+    break;
 
-    case T_CALL:
-      db_value_print (result->res.c.val_ptr);
-      break;
+  case T_CALL:
+    db_value_print(result->res.c.val_ptr);
+    break;
 
-    default:
-      (void) fprintf (stdout, "Invalid query result structure type: %d.\n", result->type);
-      break;
-    }
-
+  default:
+    (void)fprintf(stdout, "Invalid query result structure type: %d.\n", result->type);
+    break;
+  }
 }
 #endif
 
@@ -3473,22 +3436,21 @@ db_sqlx_debug_print_result (DB_QUERY_RESULT * result)
  * result(in): Pointer to the query result structure
  *
  */
-int
-db_query_end (DB_QUERY_RESULT * result)
+int db_query_end(DB_QUERY_RESULT *result)
 {
   bool notify_server;
 
-  if (tran_was_latest_query_ended ())
-    {
-      /* Query ended with latest executed query. No need to notify server. */
-      notify_server = false;
-    }
+  if (tran_was_latest_query_ended())
+  {
+    /* Query ended with latest executed query. No need to notify server. */
+    notify_server = false;
+  }
   else
-    {
-      notify_server = true;
-    }
+  {
+    notify_server = true;
+  }
 
-  return db_query_end_internal (result, notify_server);
+  return db_query_end_internal(result, notify_server);
 }
 
 /*
@@ -3497,43 +3459,42 @@ db_query_end (DB_QUERY_RESULT * result)
  * result(in/out):
  * copy(in):
  */
-int
-db_query_set_copy_tplvalue (DB_QUERY_RESULT * result, int copy)
+int db_query_set_copy_tplvalue(DB_QUERY_RESULT *result, int copy)
 {
   int retval = NO_ERROR;
-  CHECK_CONNECT_ERROR ();
+  CHECK_CONNECT_ERROR();
 
-  CHECK_1ARG_ERROR (result);
+  CHECK_1ARG_ERROR(result);
 
   if (result->status == T_CLOSED)
-    {
-      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_QPROC_OPR_ON_CLOSED_QRES, 0);
-      return ER_QPROC_OPR_ON_CLOSED_QRES;
-    }
+  {
+    er_set(ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_QPROC_OPR_ON_CLOSED_QRES, 0);
+    return ER_QPROC_OPR_ON_CLOSED_QRES;
+  }
 
   switch (result->type)
-    {
-    case T_SELECT:
-      (void) cursor_set_copy_tuple_value (&result->res.s.cursor_id, copy ? true : false);
-      break;
+  {
+  case T_SELECT:
+    (void)cursor_set_copy_tuple_value(&result->res.s.cursor_id, copy ? true : false);
+    break;
 
-    case T_CALL:
-      break;
+  case T_CALL:
+    break;
 
-    case T_OBJFETCH:
-      break;
+  case T_OBJFETCH:
+    break;
 
-#if defined (ENABLE_UNUSED_FUNCTION)
-    case T_GET:
-      break;
+#if defined(ENABLE_UNUSED_FUNCTION)
+  case T_GET:
+    break;
 #endif
-    default:
-      {
-	retval = ER_QPROC_INVALID_RESTYPE;
-	er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_QPROC_INVALID_RESTYPE, 0);
-      }
-      break;
-    }
+  default:
+  {
+    retval = ER_QPROC_INVALID_RESTYPE;
+    er_set(ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_QPROC_INVALID_RESTYPE, 0);
+  }
+  break;
+  }
 
   return retval;
 }
@@ -3543,17 +3504,16 @@ db_query_set_copy_tplvalue (DB_QUERY_RESULT * result, int copy)
  * return :
  * result(in):
  */
-bool
-db_is_client_cache_reusable (DB_QUERY_RESULT * result)
+bool db_is_client_cache_reusable(DB_QUERY_RESULT *result)
 {
   if (result && result->type == T_CACHE_HIT)
-    {
-      return true;
-    }
+  {
+    return true;
+  }
   else
-    {
-      return false;
-    }
+  {
+    return false;
+  }
 }
 
 /*
@@ -3562,18 +3522,17 @@ db_is_client_cache_reusable (DB_QUERY_RESULT * result)
  * result(in):
  * cache_time(out):
  */
-int
-db_query_get_cache_time (DB_QUERY_RESULT * result, CACHE_TIME * cache_time)
+int db_query_get_cache_time(DB_QUERY_RESULT *result, CACHE_TIME *cache_time)
 {
   if (cache_time)
-    {
-      CACHE_TIME_RESET (cache_time);
-    }
+  {
+    CACHE_TIME_RESET(cache_time);
+  }
 
   if (result != NULL && result->status != T_CLOSED && result->type == T_SELECT && cache_time)
-    {
-      *cache_time = result->res.s.cache_time;
-    }
+  {
+    *cache_time = result->res.s.cache_time;
+  }
 
   return NO_ERROR;
 }
@@ -3584,40 +3543,39 @@ db_query_get_cache_time (DB_QUERY_RESULT * result, CACHE_TIME * cache_time)
  * result(in):
  * notify_server(in):
  */
-int
-db_query_end_internal (DB_QUERY_RESULT * result, bool notify_server)
+int db_query_end_internal(DB_QUERY_RESULT *result, bool notify_server)
 {
   int error = NO_ERROR;
 
   if (db_Connect_status != DB_CONNECTION_STATUS_CONNECTED)
-    {
-      error = ER_OBJ_NO_CONNECT;
-      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_OBJ_NO_CONNECT, 0);
-    }
+  {
+    error = ER_OBJ_NO_CONNECT;
+    er_set(ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_OBJ_NO_CONNECT, 0);
+  }
 
   /* Silently return if the result structure has already been freed */
   if ((result) && (result->status == T_CLOSED))
-    {
-      return NO_ERROR;
-    }
+  {
+    return NO_ERROR;
+  }
 
   if (result)
+  {
+    if (result->type == T_SELECT)
     {
-      if (result->type == T_SELECT)
-	{
-	  if (notify_server && error == NO_ERROR)
-	    {
-	      if (qmgr_end_query (result->res.s.query_id) != NO_ERROR)
-		{
-		  assert (er_errid () != NO_ERROR);
-		  error = er_errid ();
-		}
-	    }
-	  cursor_close (&result->res.s.cursor_id);
-	}
-
-      db_free_query_result (result);
+      if (notify_server && error == NO_ERROR)
+      {
+        if (qmgr_end_query(result->res.s.query_id) != NO_ERROR)
+        {
+          assert(er_errid() != NO_ERROR);
+          error = er_errid();
+        }
+      }
+      cursor_close(&result->res.s.cursor_id);
     }
+
+    db_free_query_result(result);
+  }
 
   return error;
 }
@@ -3631,18 +3589,17 @@ db_query_end_internal (DB_QUERY_RESULT * result, bool notify_server)
  *
  * note : This function was added in order to have reasonable performance.
  */
-int
-db_query_prefetch_columns (DB_QUERY_RESULT * result, int *columns, int col_count)
+int db_query_prefetch_columns(DB_QUERY_RESULT *result, int *columns, int col_count)
 {
   int error = NO_ERROR;
   int status;
 
-  status = cursor_set_oid_columns (&result->res.s.cursor_id, columns, col_count);
+  status = cursor_set_oid_columns(&result->res.s.cursor_id, columns, col_count);
   if (status != NO_ERROR)
-    {
-      /* should be setting an error */
-      error = ER_GENERIC_ERROR;
-    }
+  {
+    /* should be setting an error */
+    error = ER_GENERIC_ERROR;
+  }
 
   return error;
 }
@@ -3652,20 +3609,19 @@ db_query_prefetch_columns (DB_QUERY_RESULT * result, int *columns, int col_count
  * return :
  * filename(in):
  */
-int
-db_query_plan_dump_file (char *filename)
+int db_query_plan_dump_file(char *filename)
 {
   if (query_Plan_dump_filename != NULL)
-    {
-      free (query_Plan_dump_filename);
-    }
+  {
+    free(query_Plan_dump_filename);
+  }
 
   query_Plan_dump_filename = NULL;
 
   if (filename != NULL)
-    {
-      query_Plan_dump_filename = strdup (filename);
-    }
+  {
+    query_Plan_dump_filename = strdup(filename);
+  }
 
   return NO_ERROR;
 }
@@ -3675,7 +3631,7 @@ db_query_plan_dump_file (char *filename)
  * return : query dump file
  */
 char *
-db_query_get_plan_dump_file ()
+db_query_get_plan_dump_file()
 {
   return query_Plan_dump_filename;
 }
@@ -3684,8 +3640,7 @@ db_query_get_plan_dump_file ()
  * db_query_is_plan_dump_opened() -
  * return : is fp opened
  */
-bool
-db_query_is_plan_dump_opened ()
+bool db_query_is_plan_dump_opened()
 {
   return query_Plan_dump_fp_open;
 }
@@ -3695,29 +3650,29 @@ db_query_is_plan_dump_opened ()
  * return : FILE *
  */
 FILE *
-db_query_plan_dump_fp_open ()
+db_query_plan_dump_fp_open()
 {
   if (query_Plan_dump_fp_open)
-    {
-      return query_Plan_dump_fp;
-    }
+  {
+    return query_Plan_dump_fp;
+  }
 
   if (query_Plan_dump_filename != NULL)
+  {
+    if (query_Plan_dump_fp == NULL || query_Plan_dump_fp == stdout)
     {
-      if (query_Plan_dump_fp == NULL || query_Plan_dump_fp == stdout)
-	{
-	  query_Plan_dump_fp = fopen (query_Plan_dump_filename, "a");
-	  if (query_Plan_dump_fp != NULL)
-	    {
-	      query_Plan_dump_fp_open = true;
-	    }
-	}
+      query_Plan_dump_fp = fopen(query_Plan_dump_filename, "a");
+      if (query_Plan_dump_fp != NULL)
+      {
+        query_Plan_dump_fp_open = true;
+      }
     }
+  }
 
   if (query_Plan_dump_fp == NULL)
-    {
-      query_Plan_dump_fp = stdout;
-    }
+  {
+    query_Plan_dump_fp = stdout;
+  }
 
   return query_Plan_dump_fp;
 }
@@ -3726,18 +3681,17 @@ db_query_plan_dump_fp_open ()
  * db_query_plan_dump_fp_close() -
  * return : void
  */
-void
-db_query_plan_dump_fp_close ()
+void db_query_plan_dump_fp_close()
 {
   /* close file handle if this function open it */
   if (query_Plan_dump_fp_open)
-    {
-      assert (query_Plan_dump_fp != NULL && query_Plan_dump_fp != stdout);
+  {
+    assert(query_Plan_dump_fp != NULL && query_Plan_dump_fp != stdout);
 
-      fclose (query_Plan_dump_fp);
-      query_Plan_dump_fp = NULL;
-      query_Plan_dump_fp_open = false;
-    }
+    fclose(query_Plan_dump_fp);
+    query_Plan_dump_fp = NULL;
+    query_Plan_dump_fp_open = false;
+  }
 }
 
 /*
@@ -3745,12 +3699,12 @@ db_query_plan_dump_fp_close ()
  * return : FILE *
  */
 FILE *
-db_query_get_plan_dump_fp ()
+db_query_get_plan_dump_fp()
 {
   if (query_Plan_dump_fp == NULL)
-    {
-      return stdout;
-    }
+  {
+    return stdout;
+  }
 
   return query_Plan_dump_fp;
 }
@@ -3763,51 +3717,50 @@ db_query_get_plan_dump_fp ()
  * return:
  *
  */
-void
-db_set_execution_plan (char *plan, int length)
+void db_set_execution_plan(char *plan, int length)
 {
   int null_padded_length = 0;
 
   if (plan == NULL)
+  {
+    if (db_Execution_plan != NULL)
     {
-      if (db_Execution_plan != NULL)
-	{
-	  db_Execution_plan[0] = '\0';
-	}
-      return;
+      db_Execution_plan[0] = '\0';
     }
+    return;
+  }
 
   null_padded_length = length + 1;
 
   if (db_Execution_plan == NULL)
+  {
+    db_Execution_plan_length = PLAN_BUF_INITIAL_LENGTH;
+    while (db_Execution_plan_length < null_padded_length)
     {
-      db_Execution_plan_length = PLAN_BUF_INITIAL_LENGTH;
-      while (db_Execution_plan_length < null_padded_length)
-	{
-	  db_Execution_plan_length *= 2;
-	}
-      db_Execution_plan = (char *) malloc (db_Execution_plan_length * sizeof (char));
+      db_Execution_plan_length *= 2;
     }
+    db_Execution_plan = (char *)malloc(db_Execution_plan_length * sizeof(char));
+  }
   else if (db_Execution_plan_length < null_padded_length)
+  {
+    while (db_Execution_plan_length < null_padded_length)
     {
-      while (db_Execution_plan_length < null_padded_length)
-	{
-	  db_Execution_plan_length *= 2;
-	}
-
-      free (db_Execution_plan);
-
-      db_Execution_plan = (char *) malloc (db_Execution_plan_length * sizeof (char));
+      db_Execution_plan_length *= 2;
     }
+
+    free(db_Execution_plan);
+
+    db_Execution_plan = (char *)malloc(db_Execution_plan_length * sizeof(char));
+  }
 
   if (db_Execution_plan == NULL)
-    {
-      db_Execution_plan_length = -1;
-      er_set (ER_NOTIFICATION_SEVERITY, ARG_FILE_LINE, ER_OUT_OF_VIRTUAL_MEMORY, 1, (size_t) db_Execution_plan_length);
-      return;
-    }
+  {
+    db_Execution_plan_length = -1;
+    er_set(ER_NOTIFICATION_SEVERITY, ARG_FILE_LINE, ER_OUT_OF_VIRTUAL_MEMORY, 1, (size_t)db_Execution_plan_length);
+    return;
+  }
 
-  strncpy (db_Execution_plan, plan, length);
+  strncpy(db_Execution_plan, plan, length);
   db_Execution_plan[length] = '\0';
 }
 
@@ -3818,12 +3771,12 @@ db_set_execution_plan (char *plan, int length)
  *
  */
 char *
-db_get_execution_plan (void)
+db_get_execution_plan(void)
 {
   if (db_Execution_plan == NULL)
-    {
-      return NULL;
-    }
+  {
+    return NULL;
+  }
 
   return db_Execution_plan;
 }
@@ -3834,12 +3787,11 @@ db_get_execution_plan (void)
  * return:
  *
  */
-void
-db_free_execution_plan (void)
+void db_free_execution_plan(void)
 {
   if (db_Execution_plan != NULL)
-    {
-      free_and_init (db_Execution_plan);
-      db_Execution_plan_length = -1;
-    }
+  {
+    free_and_init(db_Execution_plan);
+    db_Execution_plan_length = -1;
+  }
 }

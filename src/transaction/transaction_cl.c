@@ -53,7 +53,7 @@
 #include "schema_manager.h"
 #include "trigger_manager.h"
 #include "system_parameter.h"
-#include "db.h"			/* for db_Connect_status */
+#include "db.h" /* for db_Connect_status */
 #include "porting.h"
 #include "network_interface_cl.h"
 
@@ -70,7 +70,7 @@ int tm_Tran_wait_msecs = TRAN_LOCK_INFINITE_WAIT;
 bool tm_Tran_check_interrupt = true;
 int tm_Tran_ID = -1;
 int tm_Tran_invalidate_snapshot = 1;
-LOCK tm_Tran_rep_read_lock = NULL_LOCK;	/* used in RR transaction locking to not lock twice. */
+LOCK tm_Tran_rep_read_lock = NULL_LOCK; /* used in RR transaction locking to not lock twice. */
 
 /* read fetch version for current command of transaction
  * must be set before each transaction command.
@@ -101,8 +101,8 @@ static int tm_libcas_depth = 0;
  */
 static DB_NAMELIST *user_savepoint_list = NULL;
 
-static int tran_add_savepoint (const char *savept_name);
-static void tran_free_list_upto_savepoint (const char *savept_name);
+static int tran_add_savepoint(const char *savept_name);
+static void tran_free_list_upto_savepoint(const char *savept_name);
 
 /*
  * tran_cache_tran_settings - Cache transaction settings
@@ -117,8 +117,7 @@ static void tran_free_list_upto_savepoint (const char *savept_name);
  *       If tm_Tran_index is NULL then we can safely assume that the
  *       database connect flag can be turned off. i.e., db_Connect_status=0
  */
-void
-tran_cache_tran_settings (int tran_index, int lock_timeout, TRAN_ISOLATION tran_isolation)
+void tran_cache_tran_settings(int tran_index, int lock_timeout, TRAN_ISOLATION tran_isolation)
 {
   tm_Tran_index = tran_index;
   tm_Tran_wait_msecs = lock_timeout;
@@ -127,9 +126,9 @@ tran_cache_tran_settings (int tran_index, int lock_timeout, TRAN_ISOLATION tran_
   /* This is a dirty, but quick, method by which we can flag that the database connection has been terminated. This
    * flag is used by the C API calls to determine if a database connection exists. */
   if (tm_Tran_index == NULL_TRAN_INDEX)
-    {
-      db_Connect_status = DB_CONNECTION_STATUS_NOT_CONNECTED;
-    }
+  {
+    db_Connect_status = DB_CONNECTION_STATUS_NOT_CONNECTED;
+  }
 }
 
 /*
@@ -144,13 +143,12 @@ tran_cache_tran_settings (int tran_index, int lock_timeout, TRAN_ISOLATION tran_
  *
  * Note: Retrieve transaction settings.
  */
-void
-tran_get_tran_settings (int *lock_wait_in_msecs, TRAN_ISOLATION * tran_isolation, bool * async_ws)
+void tran_get_tran_settings(int *lock_wait_in_msecs, TRAN_ISOLATION *tran_isolation, bool *async_ws)
 {
-  *lock_wait_in_msecs = TM_TRAN_WAIT_MSECS ();
-  /* lock timeout in milliseconds */ ;
-  *tran_isolation = TM_TRAN_ISOLATION ();
-  *async_ws = TM_TRAN_ASYNC_WS ();
+  *lock_wait_in_msecs = TM_TRAN_WAIT_MSECS();
+  /* lock timeout in milliseconds */;
+  *tran_isolation = TM_TRAN_ISOLATION();
+  *async_ws = TM_TRAN_ASYNC_WS();
 }
 
 /*
@@ -167,12 +165,11 @@ tran_get_tran_settings (int *lock_wait_in_msecs, TRAN_ISOLATION * tran_isolation
  *
  * NOTE: Reset the default waiting time for the client transactions.
  */
-int
-tran_reset_wait_times (int wait_in_msecs)
+int tran_reset_wait_times(int wait_in_msecs)
 {
   tm_Tran_wait_msecs = wait_in_msecs;
 
-  return log_reset_wait_msecs (tm_Tran_wait_msecs);
+  return log_reset_wait_msecs(tm_Tran_wait_msecs);
 }
 
 /*
@@ -194,30 +191,29 @@ tran_reset_wait_times (int wait_in_msecs)
  *              not done some of the current acquired locks of the transaction
  *              may be released according to the new isolation level.
  */
-int
-tran_reset_isolation (TRAN_ISOLATION isolation, bool async_ws)
+int tran_reset_isolation(TRAN_ISOLATION isolation, bool async_ws)
 {
   int error_code = NO_ERROR;
 
-  if (!IS_VALID_ISOLATION_LEVEL (isolation))
-    {
-      er_set (ER_SYNTAX_ERROR_SEVERITY, ARG_FILE_LINE, ER_MVCC_LOG_INVALID_ISOLATION_LEVEL, 0);
-      return ER_MVCC_LOG_INVALID_ISOLATION_LEVEL;
-    }
+  if (!IS_VALID_ISOLATION_LEVEL(isolation))
+  {
+    er_set(ER_SYNTAX_ERROR_SEVERITY, ARG_FILE_LINE, ER_MVCC_LOG_INVALID_ISOLATION_LEVEL, 0);
+    return ER_MVCC_LOG_INVALID_ISOLATION_LEVEL;
+  }
 
   if (tm_Tran_isolation != isolation)
+  {
+    error_code = log_reset_isolation(isolation);
+    if (error_code == NO_ERROR)
     {
-      error_code = log_reset_isolation (isolation);
-      if (error_code == NO_ERROR)
-	{
-	  tm_Tran_isolation = isolation;
-	}
+      tm_Tran_isolation = isolation;
     }
+  }
 
   if (error_code == NO_ERROR)
-    {
-      tm_Tran_async_ws = async_ws;
-    }
+  {
+    tm_Tran_async_ws = async_ws;
+  }
 
   return error_code;
 }
@@ -225,24 +221,23 @@ tran_reset_isolation (TRAN_ISOLATION isolation, bool async_ws)
 /* only loaddb changes this setting */
 bool tm_Use_OID_preflush = true;
 
-int
-tran_flush_to_commit (void)
+int tran_flush_to_commit(void)
 {
   int err;
 
-  if (!ws_need_flush ())
-    {
-      return NO_ERROR;
-    }
+  if (!ws_need_flush())
+  {
+    return NO_ERROR;
+  }
 
   if (tm_Use_OID_preflush)
-    {
-      (void) locator_assign_all_permanent_oids ();
-    }
+  {
+    (void)locator_assign_all_permanent_oids();
+  }
 
   /* Flush all dirty objects */
   /* Flush virtual objects first so that locator_all_flush doesn't see any */
-  err = locator_all_flush ();
+  err = locator_all_flush();
 
   return err;
 }
@@ -268,124 +263,135 @@ tran_flush_to_commit (void)
  *              permanent and all acquired locks are released. Any locks
  *              cached in the workspace are cleared.
  */
-int
-tran_commit (bool retain_lock)
+
+// 트랜잭션을 커밋. 아직 작업공간에서 더티 상태인 모든 객체들은 페이지 버퍼 풀(서버)로 플러시
+// 그 후 커밋 명령이 서버의 트랜잭션 매니저에게 전달 됨.
+// 트랜잭션 매니저는 몇가지 작업을 수행한 후, 리커버리 매니저에게 커밋됐음을 알림. 
+// 리커버리 매니저는 트랜잭션을 커밋하며, 경우에 따라 클라이언트에서 실행되어야 할 몇가지 후속 작업이 있음을 알릴수도 있음
+// 트랜잭션에 의해 모든 변경사항은 반영되고, 획득했던 모든 락이 해제됨.
+int tran_commit(bool retain_lock)
 {
   TRAN_STATE state;
   int error_code = NO_ERROR;
   bool query_end_notify_server;
 
-  /* check deferred trigger activities, these may prevent the transaction from being committed. */
-  error_code = tr_check_commit_triggers (TR_TIME_BEFORE);
+  /* check deferred trigger activities, these may prevent the transaction from being committed. */\
+  // 지연된 트리거 활동을 확인, 이들은 트랜잭션이 커밋되는 것을 방지할 수 있음
+  // gdb로 따라갔을땐 아무 처리 안함
+  error_code = tr_check_commit_triggers(TR_TIME_BEFORE);
   if (error_code != NO_ERROR)
-    {
-      return error_code;
-    }
+  {
+    return error_code;
+  }
 
   /* tell the schema manager to flush any transaction caches */
-  sm_transaction_boundary ();
+  // ws_Resident_classes의 db 오브젝트 리스트가 존재하면 초기화만 시켜줌
+  sm_transaction_boundary();
 
-  error_code = tran_flush_to_commit ();
+  //별다른 처리 안함
+  error_code = tran_flush_to_commit();
   if (error_code != NO_ERROR)
-    {
-      return error_code;
-    }
+  {
+    return error_code;
+  }
 
-  assert (!tran_was_latest_query_aborted ());
-  if (tran_was_latest_query_ended () || tran_is_in_libcas ())
-    {
-      /* Query ended with latest executed query. No need to notify server. */
-      query_end_notify_server = false;
-    }
+  assert(!tran_was_latest_query_aborted());
+  if (tran_was_latest_query_ended() || tran_is_in_libcas())
+  {
+    /* Query ended with latest executed query. No need to notify server. */
+    query_end_notify_server = false;
+  }
   else
-    {
-      query_end_notify_server = true;
-      assert (!tran_was_latest_query_committed ());
-    }
+  {
+    query_end_notify_server = true;
+    assert(!tran_was_latest_query_committed());
+  }
 
   /* Clear all the queries */
-  db_clear_client_query_result (query_end_notify_server, false);
+  // 클라이언트에서 트랜잭션이 커밋/중단되거나 서버가 다운될 때 호출되어 기존 쿼리 결과 구조체를 종료하기위한 함수
+  db_clear_client_query_result(query_end_notify_server, false);
 
   /* if the commit fails or not, we should clear the clients savepoint list */
-  tran_free_savepoint_list ();
+  tran_free_savepoint_list();
 
-  if (!tran_was_latest_query_committed ())
+  if (!tran_was_latest_query_committed())
+  {
+    /* Forward the commit the transaction manager in the server */
+    // 서버로 커밋
+    state = tran_server_commit(retain_lock);
+
+    switch (state)
     {
-      /* Forward the commit the transaction manager in the server */
-      state = tran_server_commit (retain_lock);
+    case TRAN_UNACTIVE_COMMITTED:
+    case TRAN_UNACTIVE_COMMITTED_INFORMING_PARTICIPANTS:
+      /* Successful commit */
+      error_code = NO_ERROR;
+      break;
 
-      switch (state)
-	{
-	case TRAN_UNACTIVE_COMMITTED:
-	case TRAN_UNACTIVE_COMMITTED_INFORMING_PARTICIPANTS:
-	  /* Successful commit */
-	  error_code = NO_ERROR;
-	  break;
-
-	case TRAN_UNACTIVE_ABORTED:
-	case TRAN_UNACTIVE_ABORTED_INFORMING_PARTICIPANTS:
-	case TRAN_UNACTIVE_UNILATERALLY_ABORTED:
-	  /* The commit failed */
-	  ASSERT_ERROR_AND_SET (error_code);
+    case TRAN_UNACTIVE_ABORTED:
+    case TRAN_UNACTIVE_ABORTED_INFORMING_PARTICIPANTS:
+    case TRAN_UNACTIVE_UNILATERALLY_ABORTED:
+      /* The commit failed */
+      ASSERT_ERROR_AND_SET(error_code);
 #if defined(CUBRID_DEBUG)
-	  er_log_debug (ARG_FILE_LINE, "tran_commit: Unable to commit. Transaction was aborted\n");
+      er_log_debug(ARG_FILE_LINE, "tran_commit: Unable to commit. Transaction was aborted\n");
 #endif /* CUBRID_DEBUG */
-	  break;
+      break;
 
-	case TRAN_UNACTIVE_UNKNOWN:
-	  if (!BOOT_IS_CLIENT_RESTARTED ())
-	    {
-	      ASSERT_ERROR_AND_SET (error_code);
-	      break;
-	    }
-	  /* Fall Thru */
-	case TRAN_RECOVERY:
-	case TRAN_ACTIVE:
-	case TRAN_UNACTIVE_COMMITTED_WITH_POSTPONE:
-	case TRAN_UNACTIVE_TOPOPE_COMMITTED_WITH_POSTPONE:
-	case TRAN_UNACTIVE_2PC_PREPARE:
-	case TRAN_UNACTIVE_2PC_COLLECTING_PARTICIPANT_VOTES:
-	case TRAN_UNACTIVE_2PC_ABORT_DECISION:
-	case TRAN_UNACTIVE_2PC_COMMIT_DECISION:
-	default:
-	  ASSERT_ERROR_AND_SET (error_code);
+    case TRAN_UNACTIVE_UNKNOWN:
+      if (!BOOT_IS_CLIENT_RESTARTED())
+      {
+        ASSERT_ERROR_AND_SET(error_code);
+        break;
+      }
+      /* Fall Thru */
+    case TRAN_RECOVERY:
+    case TRAN_ACTIVE:
+    case TRAN_UNACTIVE_COMMITTED_WITH_POSTPONE:
+    case TRAN_UNACTIVE_TOPOPE_COMMITTED_WITH_POSTPONE:
+    case TRAN_UNACTIVE_2PC_PREPARE:
+    case TRAN_UNACTIVE_2PC_COLLECTING_PARTICIPANT_VOTES:
+    case TRAN_UNACTIVE_2PC_ABORT_DECISION:
+    case TRAN_UNACTIVE_2PC_COMMIT_DECISION:
+    default:
+      ASSERT_ERROR_AND_SET(error_code);
 #if defined(CUBRID_DEBUG)
-	  er_log_debug (ARG_FILE_LINE, "tran_commit: Unknown commit state = %s at client\n", log_state_string (state));
+      er_log_debug(ARG_FILE_LINE, "tran_commit: Unknown commit state = %s at client\n", log_state_string(state));
 #endif /* CUBRID_DEBUG */
-	  break;
-	}
+      break;
     }
-  else if (tran_is_reset_required () && log_does_allow_replication ())
-    {
-      /*
-       * fail-back action
-       * make the client to reconnect to the active server
-       */
-      db_Connect_status = DB_CONNECTION_STATUS_RESET;
-      er_log_debug (ARG_FILE_LINE, "tran_commit: DB_CONNECTION_STATUS_RESET\n");
-    }
+  }
+  else if (tran_is_reset_required() && log_does_allow_replication())
+  {
+    /*
+     * fail-back action
+     * make the client to reconnect to the active server
+     */
+    db_Connect_status = DB_CONNECTION_STATUS_RESET;
+    er_log_debug(ARG_FILE_LINE, "tran_commit: DB_CONNECTION_STATUS_RESET\n");
+  }
 
   /* Increment snapshot version in work space */
-  ws_increment_mvcc_snapshot_version ();
+  ws_increment_mvcc_snapshot_version();
 
   /* clear workspace information and any open query cursors */
-  if (error_code == NO_ERROR || BOOT_IS_CLIENT_RESTARTED ())
-    {
-      ws_clear_all_hints (retain_lock);
-      er_stack_clearall ();
-    }
+  if (error_code == NO_ERROR || BOOT_IS_CLIENT_RESTARTED())
+  {
+    ws_clear_all_hints(retain_lock);
+    er_stack_clearall();
+  }
 
   /* allow triggers AFTER the commit */
   if (error_code == NO_ERROR)
-    {
-      error_code = tr_check_commit_triggers (TR_TIME_AFTER);
-    }
+  {
+    error_code = tr_check_commit_triggers(TR_TIME_AFTER);
+  }
 
   tm_Tran_rep_read_lock = NULL_LOCK;
 
-  tran_reset_latest_query_status ();
+  tran_reset_latest_query_status();
 
-  // FIXME: If SP supports TCL, the libcas depth should not be reset. 
+  // FIXME: If SP supports TCL, the libcas depth should not be reset.
   // A nested SP can perform commit/rollback
   // tran_reset_libcas_function ();
 
@@ -409,8 +415,7 @@ tran_commit (bool retain_lock)
  *              are rolled back and acquired locks are released. Any locks
  *              cached in the workspace are cleared.
  */
-int
-tran_abort (void)
+int tran_abort(void)
 {
   TRAN_STATE state;
   int error_code = NO_ERROR;
@@ -421,89 +426,89 @@ tran_abort (void)
    * rollback, might not want to do this if we're being unilaterally
    * aborted ?
    */
-  tr_check_rollback_triggers (TR_TIME_BEFORE);
+  tr_check_rollback_triggers(TR_TIME_BEFORE);
 
   /* tell the schema manager to flush any transaction caches */
-  sm_transaction_boundary ();
+  sm_transaction_boundary();
 
 #if defined(SA_MODE)
-  ws_clear ();
-#else /* SA_MODE */
+  ws_clear();
+#else  /* SA_MODE */
   /* Remove any dirty objects and remove any hints */
-  ws_abort_mops (false);
-  ws_filter_dirty ();
+  ws_abort_mops(false);
+  ws_filter_dirty();
 #endif /* SA_MODE */
 
   /* free the local list of savepoint names */
-  tran_free_savepoint_list ();
+  tran_free_savepoint_list();
 
   /* Clear any query cursor */
-  assert (!tran_was_latest_query_committed ());
+  assert(!tran_was_latest_query_committed());
 
-  if (tran_was_latest_query_ended ())
-    {
-      /* Query ended with latest executed query. No need to notify server. */
-      query_end_notify_server = false;
-    }
+  if (tran_was_latest_query_ended())
+  {
+    /* Query ended with latest executed query. No need to notify server. */
+    query_end_notify_server = false;
+  }
   else
+  {
+    query_end_notify_server = true;
+    assert(!tran_was_latest_query_aborted());
+  }
+  db_clear_client_query_result(query_end_notify_server, true);
+
+  if (!tran_was_latest_query_aborted())
+  {
+    /* Forward the abort the transaction manager in the server */
+    state = tran_server_abort();
+
+    switch (state)
     {
-      query_end_notify_server = true;
-      assert (!tran_was_latest_query_aborted ());
-    }
-  db_clear_client_query_result (query_end_notify_server, true);
+    case TRAN_UNACTIVE_ABORTED:
+    case TRAN_UNACTIVE_ABORTED_INFORMING_PARTICIPANTS:
+      /* Successful abort */
+      break;
 
-  if (!tran_was_latest_query_aborted ())
-    {
-      /* Forward the abort the transaction manager in the server */
-      state = tran_server_abort ();
-
-      switch (state)
-	{
-	case TRAN_UNACTIVE_ABORTED:
-	case TRAN_UNACTIVE_ABORTED_INFORMING_PARTICIPANTS:
-	  /* Successful abort */
-	  break;
-
-	case TRAN_UNACTIVE_UNKNOWN:
-	  if (!BOOT_IS_CLIENT_RESTARTED ())
-	    {
-	      ASSERT_ERROR_AND_SET (error_code);
-	      break;
-	    }
-	  /* Fall Thru */
-	case TRAN_RECOVERY:
-	case TRAN_ACTIVE:
-	case TRAN_UNACTIVE_COMMITTED:
-	case TRAN_UNACTIVE_COMMITTED_WITH_POSTPONE:
-	case TRAN_UNACTIVE_UNILATERALLY_ABORTED:
-	case TRAN_UNACTIVE_TOPOPE_COMMITTED_WITH_POSTPONE:
-	case TRAN_UNACTIVE_2PC_PREPARE:
-	case TRAN_UNACTIVE_2PC_COLLECTING_PARTICIPANT_VOTES:
-	case TRAN_UNACTIVE_2PC_ABORT_DECISION:
-	case TRAN_UNACTIVE_2PC_COMMIT_DECISION:
-	case TRAN_UNACTIVE_COMMITTED_INFORMING_PARTICIPANTS:
-	default:
-	  ASSERT_ERROR_AND_SET (error_code);
+    case TRAN_UNACTIVE_UNKNOWN:
+      if (!BOOT_IS_CLIENT_RESTARTED())
+      {
+        ASSERT_ERROR_AND_SET(error_code);
+        break;
+      }
+      /* Fall Thru */
+    case TRAN_RECOVERY:
+    case TRAN_ACTIVE:
+    case TRAN_UNACTIVE_COMMITTED:
+    case TRAN_UNACTIVE_COMMITTED_WITH_POSTPONE:
+    case TRAN_UNACTIVE_UNILATERALLY_ABORTED:
+    case TRAN_UNACTIVE_TOPOPE_COMMITTED_WITH_POSTPONE:
+    case TRAN_UNACTIVE_2PC_PREPARE:
+    case TRAN_UNACTIVE_2PC_COLLECTING_PARTICIPANT_VOTES:
+    case TRAN_UNACTIVE_2PC_ABORT_DECISION:
+    case TRAN_UNACTIVE_2PC_COMMIT_DECISION:
+    case TRAN_UNACTIVE_COMMITTED_INFORMING_PARTICIPANTS:
+    default:
+      ASSERT_ERROR_AND_SET(error_code);
 #if defined(CUBRID_DEBUG)
-	  er_log_debug (ARG_FILE_LINE, "tran_abort: Unknown abort state = %s\n", log_state_string (state));
+      er_log_debug(ARG_FILE_LINE, "tran_abort: Unknown abort state = %s\n", log_state_string(state));
 #endif /* CUBRID_DEBUG */
-	  break;
-	}
+      break;
     }
+  }
 
   /* Increment snapshot version in work space */
-  ws_increment_mvcc_snapshot_version ();
+  ws_increment_mvcc_snapshot_version();
 
-  er_stack_clearall ();
+  er_stack_clearall();
 
   /* can these do anything useful ? */
-  tr_check_rollback_triggers (TR_TIME_AFTER);
+  tr_check_rollback_triggers(TR_TIME_AFTER);
 
   tm_Tran_rep_read_lock = NULL_LOCK;
 
-  tran_reset_latest_query_status ();
+  tran_reset_latest_query_status();
 
-  // FIXME: If SP supports TCL, the libcas depth should not be reset. 
+  // FIXME: If SP supports TCL, the libcas depth should not be reset.
   // A nested SP can perform commit/rollback
   // tran_reset_libcas_function ();
 
@@ -519,8 +524,7 @@ tran_abort (void)
  *              module of the system.
  *              Execute tran_abort & set an error message
  */
-int
-tran_unilaterally_abort (void)
+int tran_unilaterally_abort(void)
 {
   int error_code = NO_ERROR;
   char user_name[L_cuserid + 1];
@@ -528,23 +532,23 @@ tran_unilaterally_abort (void)
   int pid;
 
   /* Get the user name, host, and process identifier */
-  if (getuserid (user_name, L_cuserid) == NULL)
-    {
-      strcpy (user_name, "(unknown)");
-    }
-  if (GETHOSTNAME (host, CUB_MAXHOSTNAMELEN) != 0)
-    {
-      /* unknown error */
-      strcpy (host, "(unknown)");
-    }
-  pid = getpid ();
+  if (getuserid(user_name, L_cuserid) == NULL)
+  {
+    strcpy(user_name, "(unknown)");
+  }
+  if (GETHOSTNAME(host, CUB_MAXHOSTNAMELEN) != 0)
+  {
+    /* unknown error */
+    strcpy(host, "(unknown)");
+  }
+  pid = getpid();
 
-  er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_LK_UNILATERALLY_ABORTED, 4, tm_Tran_index, user_name, host, pid);
+  er_set(ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_LK_UNILATERALLY_ABORTED, 4, tm_Tran_index, user_name, host, pid);
 
-  error_code = tran_abort ();
+  error_code = tran_abort();
 
   /* does it make sense to have these ? */
-  tr_check_abort_triggers ();
+  tr_check_abort_triggers();
 
   return error_code;
 }
@@ -565,37 +569,36 @@ tran_unilaterally_abort (void)
  *              transaction object locator) finds that the transaction was
  *              unilaterally aborted.
  */
-int
-tran_abort_only_client (bool is_server_down)
+int tran_abort_only_client(bool is_server_down)
 {
-  if (!BOOT_IS_CLIENT_RESTARTED ())
+  if (!BOOT_IS_CLIENT_RESTARTED())
+  {
+    if (is_server_down)
     {
-      if (is_server_down)
-	{
-	  er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_TM_SERVER_DOWN_UNILATERALLY_ABORTED, 0);
-	  return ER_TM_SERVER_DOWN_UNILATERALLY_ABORTED;
-	}
-
-      return NO_ERROR;
+      er_set(ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_TM_SERVER_DOWN_UNILATERALLY_ABORTED, 0);
+      return ER_TM_SERVER_DOWN_UNILATERALLY_ABORTED;
     }
 
+    return NO_ERROR;
+  }
+
   /* Remove any dirty objects and close all open query cursors */
-  ws_abort_mops (true);
-  ws_filter_dirty ();
-  db_clear_client_query_result (false, true);
+  ws_abort_mops(true);
+  ws_filter_dirty();
+  db_clear_client_query_result(false, true);
 
   tm_Tran_rep_read_lock = NULL_LOCK;
 
   if (is_server_down == false)
-    {
-      tr_check_abort_triggers ();
-      return NO_ERROR;
-    }
+  {
+    tr_check_abort_triggers();
+    return NO_ERROR;
+  }
   else
-    {
-      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_TM_SERVER_DOWN_UNILATERALLY_ABORTED, 0);
-      return ER_TM_SERVER_DOWN_UNILATERALLY_ABORTED;
-    }
+  {
+    er_set(ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_TM_SERVER_DOWN_UNILATERALLY_ABORTED, 0);
+    return ER_TM_SERVER_DOWN_UNILATERALLY_ABORTED;
+  }
 
   return NO_ERROR;
 }
@@ -607,10 +610,9 @@ tran_abort_only_client (bool is_server_down)
  *
  * NOTE:Find if the transaction has dirtied the database.
  */
-bool
-tran_has_updated (void)
+bool tran_has_updated(void)
 {
-  return (ws_has_updated () || tran_server_has_updated ());
+  return (ws_has_updated() || tran_server_has_updated());
 }
 
 /*
@@ -622,10 +624,9 @@ tran_has_updated (void)
  * NOTE:Find if the transaction is active and has updated/dirtied the
  *              database.
  */
-bool
-tran_is_active_and_has_updated (void)
+bool tran_is_active_and_has_updated(void)
 {
-  return (ws_has_updated () || tran_server_is_active_and_has_updated ());
+  return (ws_has_updated() || tran_server_is_active_and_has_updated());
 }
 
 /*
@@ -643,18 +644,17 @@ tran_is_active_and_has_updated (void)
  *              You can use this function to set the longer format of global
  *              transaction identifier such as XID of XA interface.
  */
-int
-tran_set_global_tran_info (int gtrid, void *info, int size)
+int tran_set_global_tran_info(int gtrid, void *info, int size)
 {
-  if (tran_server_set_global_tran_info (gtrid, info, size) == NO_ERROR)
-    {
-      return NO_ERROR;
-    }
+  if (tran_server_set_global_tran_info(gtrid, info, size) == NO_ERROR)
+  {
+    return NO_ERROR;
+  }
   else
-    {
-      assert (er_errid () != NO_ERROR);
-      return er_errid ();
-    }
+  {
+    assert(er_errid() != NO_ERROR);
+    return er_errid();
+  }
 }
 
 /*
@@ -673,16 +673,15 @@ tran_set_global_tran_info (int gtrid, void *info, int size)
  *              function is designed to use if you want to get XID after
  *              calling 'db_2pc_prepared_transactions' to support xa_recover()
  */
-int
-tran_get_global_tran_info (int gtrid, void *buffer, int size)
+int tran_get_global_tran_info(int gtrid, void *buffer, int size)
 {
   int error_code = NO_ERROR;
 
-  if (tran_server_get_global_tran_info (gtrid, buffer, size) != NO_ERROR)
-    {
-      assert (er_errid () != NO_ERROR);
-      error_code = er_errid ();
-    }
+  if (tran_server_get_global_tran_info(gtrid, buffer, size) != NO_ERROR)
+  {
+    assert(er_errid() != NO_ERROR);
+    error_code = er_errid();
+  }
 
   return error_code;
 }
@@ -701,10 +700,9 @@ tran_get_global_tran_info (int gtrid, void *buffer, int size)
  *              The function 'db_2pc_prepare_transaction' should be used if
  *              this function is called.
  */
-int
-tran_2pc_start (void)
+int tran_2pc_start(void)
 {
-  return tran_server_2pc_start ();
+  return tran_server_2pc_start();
 }
 
 /*
@@ -721,89 +719,88 @@ tran_2pc_start (void)
  *              be executed are 'db_commit_transaction' &
  *              'db_abort_transaction'.
  */
-int
-tran_2pc_prepare (void)
+int tran_2pc_prepare(void)
 {
   TRAN_STATE state;
   int error_code = NO_ERROR;
 
   /* flush all dirty objects */
-  error_code = locator_all_flush ();
+  error_code = locator_all_flush();
   if (error_code != NO_ERROR)
-    {
+  {
 #if defined(CUBRID_DEBUG)
-      er_log_debug (ARG_FILE_LINE, "tm_2pc_prepare: Unable to prepare. Flush failed\n");
+    er_log_debug(ARG_FILE_LINE, "tm_2pc_prepare: Unable to prepare. Flush failed\n");
 #endif /* CUBRID_DEBUG */
-      goto end;
-    }
+    goto end;
+  }
 
   /* forward the prepare to the transaction manager in the server */
-  state = tran_server_2pc_prepare ();
+  state = tran_server_2pc_prepare();
   switch (state)
+  {
+  case TRAN_ACTIVE:
+    /* The preparation to commit failed probably due to inproper state; Transaction is still active */
+    assert(er_errid() != NO_ERROR);
+    error_code = er_errid();
+#if defined(CUBRID_DEBUG)
+    er_log_debug(ARG_FILE_LINE, "tm_2pc_prepare: Unable to prepare. Transaction is still active\n");
+#endif /* CUBRID_DEBUG */
+    break;
+
+  case TRAN_UNACTIVE_2PC_PREPARE:
+    /* Successful to prepare (or repeated preparation). */
+    error_code = NO_ERROR;
+    break;
+
+  case TRAN_UNACTIVE_ABORTED:
+  case TRAN_UNACTIVE_UNILATERALLY_ABORTED:
+    /* The preparation to commit failed; Transaction has been aborted */
+    assert(er_errid() != NO_ERROR);
+    error_code = er_errid();
+#if defined(CUBRID_DEBUG)
+    er_log_debug(ARG_FILE_LINE, "tm_2pc_prepare: Unable to prepare. Transaction was aborted\n");
+#endif /* CUBRID_DEBUG */
+    break;
+
+  case TRAN_UNACTIVE_COMMITTED:
+    /* The transaction was committed. There is not a need for 2PC prepare. This could happend for read only
+     * transactions. */
+    error_code = NO_ERROR;
+    break;
+
+  case TRAN_UNACTIVE_UNKNOWN:
+    if (!BOOT_IS_CLIENT_RESTARTED())
     {
-    case TRAN_ACTIVE:
-      /* The preparation to commit failed probably due to inproper state; Transaction is still active */
-      assert (er_errid () != NO_ERROR);
-      error_code = er_errid ();
+      assert(er_errid() != NO_ERROR);
+      error_code = er_errid();
+      break;
+    }
+    /* fall thru */
+
+  case TRAN_RECOVERY:
+  case TRAN_UNACTIVE_COMMITTED_WITH_POSTPONE:
+  case TRAN_UNACTIVE_TOPOPE_COMMITTED_WITH_POSTPONE:
+  case TRAN_UNACTIVE_2PC_COLLECTING_PARTICIPANT_VOTES:
+  case TRAN_UNACTIVE_2PC_ABORT_DECISION:
+  case TRAN_UNACTIVE_2PC_COMMIT_DECISION:
+  case TRAN_UNACTIVE_COMMITTED_INFORMING_PARTICIPANTS:
+  case TRAN_UNACTIVE_ABORTED_INFORMING_PARTICIPANTS:
+  default:
+    assert(er_errid() != NO_ERROR);
+    error_code = er_errid();
 #if defined(CUBRID_DEBUG)
-      er_log_debug (ARG_FILE_LINE, "tm_2pc_prepare: Unable to prepare. Transaction is still active\n");
+    er_log_debug(ARG_FILE_LINE, "tm_2pc_prepare: Unexpected prepare. state = %s\n", log_state_string(state));
 #endif /* CUBRID_DEBUG */
-      break;
-
-    case TRAN_UNACTIVE_2PC_PREPARE:
-      /* Successful to prepare (or repeated preparation). */
-      error_code = NO_ERROR;
-      break;
-
-    case TRAN_UNACTIVE_ABORTED:
-    case TRAN_UNACTIVE_UNILATERALLY_ABORTED:
-      /* The preparation to commit failed; Transaction has been aborted */
-      assert (er_errid () != NO_ERROR);
-      error_code = er_errid ();
-#if defined(CUBRID_DEBUG)
-      er_log_debug (ARG_FILE_LINE, "tm_2pc_prepare: Unable to prepare. Transaction was aborted\n");
-#endif /* CUBRID_DEBUG */
-      break;
-
-    case TRAN_UNACTIVE_COMMITTED:
-      /* The transaction was committed. There is not a need for 2PC prepare. This could happend for read only
-       * transactions. */
-      error_code = NO_ERROR;
-      break;
-
-    case TRAN_UNACTIVE_UNKNOWN:
-      if (!BOOT_IS_CLIENT_RESTARTED ())
-	{
-	  assert (er_errid () != NO_ERROR);
-	  error_code = er_errid ();
-	  break;
-	}
-      /* fall thru */
-
-    case TRAN_RECOVERY:
-    case TRAN_UNACTIVE_COMMITTED_WITH_POSTPONE:
-    case TRAN_UNACTIVE_TOPOPE_COMMITTED_WITH_POSTPONE:
-    case TRAN_UNACTIVE_2PC_COLLECTING_PARTICIPANT_VOTES:
-    case TRAN_UNACTIVE_2PC_ABORT_DECISION:
-    case TRAN_UNACTIVE_2PC_COMMIT_DECISION:
-    case TRAN_UNACTIVE_COMMITTED_INFORMING_PARTICIPANTS:
-    case TRAN_UNACTIVE_ABORTED_INFORMING_PARTICIPANTS:
-    default:
-      assert (er_errid () != NO_ERROR);
-      error_code = er_errid ();
-#if defined(CUBRID_DEBUG)
-      er_log_debug (ARG_FILE_LINE, "tm_2pc_prepare: Unexpected prepare. state = %s\n", log_state_string (state));
-#endif /* CUBRID_DEBUG */
-      break;
-    }				/* switch (state) */
+    break;
+  } /* switch (state) */
 
   /* clear workspace information and any open query cursors */
-  if (error_code == NO_ERROR || BOOT_IS_CLIENT_RESTARTED ())
-    {
-      db_clear_client_query_result (true, true);
-      ws_clear_all_hints (false);
-      er_stack_clearall ();
-    }
+  if (error_code == NO_ERROR || BOOT_IS_CLIENT_RESTARTED())
+  {
+    db_clear_client_query_result(true, true);
+    ws_clear_all_hints(false);
+    er_stack_clearall();
+  }
 
 end:
   return error_code;
@@ -823,10 +820,9 @@ end:
  *              If the return value is less than the 'size', there's no more
  *              transactions to recover.
  */
-int
-tran_2pc_recovery_prepared (int gtrids[], int size)
+int tran_2pc_recovery_prepared(int gtrids[], int size)
 {
-  return tran_server_2pc_recovery_prepared (gtrids, size);
+  return tran_server_2pc_recovery_prepared(gtrids, size);
 }
 
 /*
@@ -844,17 +840,16 @@ tran_2pc_recovery_prepared (int gtrids[], int size)
  *              transaction just after the client restart or after a commit
  *              or abort.
  */
-int
-tran_2pc_attach_global_tran (int gtrid)
+int tran_2pc_attach_global_tran(int gtrid)
 {
   int new_tran_index;
 
-  new_tran_index = tran_server_2pc_attach_global_tran (gtrid);
+  new_tran_index = tran_server_2pc_attach_global_tran(gtrid);
   if (new_tran_index == NULL_TRAN_INDEX)
-    {
-      assert (er_errid () != NO_ERROR);
-      return er_errid ();
-    }
+  {
+    assert(er_errid() != NO_ERROR);
+    return er_errid();
+  }
 
   tm_Tran_index = new_tran_index;
 
@@ -875,94 +870,93 @@ tran_2pc_attach_global_tran (int gtrid)
  *              forwarded to the transaction manager to guarantee the
  *              the commitment.
  */
-int
-tran_2pc_prepare_global_tran (int gtrid)
+int tran_2pc_prepare_global_tran(int gtrid)
 {
   TRAN_STATE state;
   int error_code = NO_ERROR;
 
   /* Flush all dirty objects */
-  error_code = locator_all_flush ();
+  error_code = locator_all_flush();
   if (error_code != NO_ERROR)
-    {
+  {
 #if defined(CUBRID_DEBUG)
-      er_log_debug (ARG_FILE_LINE, "tm_2pc_prepare: Unable to prepare to commit. \nFlush failed\n");
+    er_log_debug(ARG_FILE_LINE, "tm_2pc_prepare: Unable to prepare to commit. \nFlush failed\n");
 #endif /* CUBRID_DEBUG */
-      return error_code;
-    }
+    return error_code;
+  }
 
   /* Forward the prepare to commit to the transaction manager in the server */
-  state = tran_server_2pc_prepare_global_tran (gtrid);
+  state = tran_server_2pc_prepare_global_tran(gtrid);
   switch (state)
+  {
+  case TRAN_ACTIVE:
+    /* The preperation to commit failed probabely due to the given global transaction identifier; Transaction is
+     * still active */
+    assert(er_errid() != NO_ERROR);
+    error_code = er_errid();
+#if defined(CUBRID_DEBUG)
+    er_log_debug(ARG_FILE_LINE, "tm_2pc_prepare: Unable to prepare to commit.\n %s",
+                 "Transaction is still active\n");
+#endif /* CUBRID_DEBUG */
+    break;
+
+  case TRAN_UNACTIVE_2PC_PREPARE:
+    /* Successful preperation to commit */
+    error_code = NO_ERROR;
+    break;
+
+  case TRAN_UNACTIVE_ABORTED:
+  case TRAN_UNACTIVE_UNILATERALLY_ABORTED:
+    /* The preperation to commit failed; Transaction has been aborted */
+    assert(er_errid() != NO_ERROR);
+    error_code = er_errid();
+#if defined(CUBRID_DEBUG)
+    er_log_debug(ARG_FILE_LINE, "tm_2pc_prepare: Unable to prepare to commit.\n %s", "Transaction was aborted\n");
+#endif /* CUBRID_DEBUG */
+    break;
+
+  case TRAN_UNACTIVE_COMMITTED:
+    /*
+     * The transaction was committed. There is not a need for 2PC prepare.
+     * This could happen for read only transactions
+     */
+    error_code = NO_ERROR;
+    break;
+
+  case TRAN_UNACTIVE_UNKNOWN:
+    if (!BOOT_IS_CLIENT_RESTARTED())
     {
-    case TRAN_ACTIVE:
-      /* The preperation to commit failed probabely due to the given global transaction identifier; Transaction is
-       * still active */
-      assert (er_errid () != NO_ERROR);
-      error_code = er_errid ();
-#if defined(CUBRID_DEBUG)
-      er_log_debug (ARG_FILE_LINE, "tm_2pc_prepare: Unable to prepare to commit.\n %s",
-		    "Transaction is still active\n");
-#endif /* CUBRID_DEBUG */
-      break;
-
-    case TRAN_UNACTIVE_2PC_PREPARE:
-      /* Successful preperation to commit */
-      error_code = NO_ERROR;
-      break;
-
-    case TRAN_UNACTIVE_ABORTED:
-    case TRAN_UNACTIVE_UNILATERALLY_ABORTED:
-      /* The preperation to commit failed; Transaction has been aborted */
-      assert (er_errid () != NO_ERROR);
-      error_code = er_errid ();
-#if defined(CUBRID_DEBUG)
-      er_log_debug (ARG_FILE_LINE, "tm_2pc_prepare: Unable to prepare to commit.\n %s", "Transaction was aborted\n");
-#endif /* CUBRID_DEBUG */
-      break;
-
-    case TRAN_UNACTIVE_COMMITTED:
-      /*
-       * The transaction was committed. There is not a need for 2PC prepare.
-       * This could happen for read only transactions
-       */
-      error_code = NO_ERROR;
-      break;
-
-    case TRAN_UNACTIVE_UNKNOWN:
-      if (!BOOT_IS_CLIENT_RESTARTED ())
-	{
-	  assert (er_errid () != NO_ERROR);
-	  error_code = er_errid ();
-	  break;
-	}
-      /* Fall Thru */
-
-    case TRAN_RECOVERY:
-    case TRAN_UNACTIVE_COMMITTED_WITH_POSTPONE:
-    case TRAN_UNACTIVE_TOPOPE_COMMITTED_WITH_POSTPONE:
-    case TRAN_UNACTIVE_2PC_COLLECTING_PARTICIPANT_VOTES:
-    case TRAN_UNACTIVE_2PC_ABORT_DECISION:
-    case TRAN_UNACTIVE_2PC_COMMIT_DECISION:
-    case TRAN_UNACTIVE_COMMITTED_INFORMING_PARTICIPANTS:
-    case TRAN_UNACTIVE_ABORTED_INFORMING_PARTICIPANTS:
-    default:
-      assert (er_errid () != NO_ERROR);
-      error_code = er_errid ();
-#if defined(CUBRID_DEBUG)
-      er_log_debug (ARG_FILE_LINE, "tm_2pc_prepare: Unexpected prepare to commit state = %s\n",
-		    log_state_string (state));
-#endif /* CUBRID_DEBUG */
+      assert(er_errid() != NO_ERROR);
+      error_code = er_errid();
       break;
     }
+    /* Fall Thru */
+
+  case TRAN_RECOVERY:
+  case TRAN_UNACTIVE_COMMITTED_WITH_POSTPONE:
+  case TRAN_UNACTIVE_TOPOPE_COMMITTED_WITH_POSTPONE:
+  case TRAN_UNACTIVE_2PC_COLLECTING_PARTICIPANT_VOTES:
+  case TRAN_UNACTIVE_2PC_ABORT_DECISION:
+  case TRAN_UNACTIVE_2PC_COMMIT_DECISION:
+  case TRAN_UNACTIVE_COMMITTED_INFORMING_PARTICIPANTS:
+  case TRAN_UNACTIVE_ABORTED_INFORMING_PARTICIPANTS:
+  default:
+    assert(er_errid() != NO_ERROR);
+    error_code = er_errid();
+#if defined(CUBRID_DEBUG)
+    er_log_debug(ARG_FILE_LINE, "tm_2pc_prepare: Unexpected prepare to commit state = %s\n",
+                 log_state_string(state));
+#endif /* CUBRID_DEBUG */
+    break;
+  }
 
   /* clear workspace information and any open query cursors */
-  if (error_code == NO_ERROR || BOOT_IS_CLIENT_RESTARTED ())
-    {
-      db_clear_client_query_result (true, true);
-      ws_clear_all_hints (false);
-      er_stack_clearall ();
-    }
+  if (error_code == NO_ERROR || BOOT_IS_CLIENT_RESTARTED())
+  {
+    db_clear_client_query_result(true, true);
+    ws_clear_all_hints(false);
+    er_stack_clearall();
+  }
 
   return error_code;
 }
@@ -978,25 +972,25 @@ tran_2pc_prepare_global_tran (int gtrid)
  * is sorted in reverse chronological order
  */
 static int
-tran_add_savepoint (const char *savept_name)
+tran_add_savepoint(const char *savept_name)
 {
   DB_NAMELIST *sp;
 
-  sp = (DB_NAMELIST *) db_ws_alloc (sizeof (DB_NAMELIST));
+  sp = (DB_NAMELIST *)db_ws_alloc(sizeof(DB_NAMELIST));
   if (sp == NULL)
-    {
-      assert (er_errid () != NO_ERROR);
-      return er_errid ();
-    }
+  {
+    assert(er_errid() != NO_ERROR);
+    return er_errid();
+  }
 
-  sp->name = ws_copy_string (savept_name);
+  sp->name = ws_copy_string(savept_name);
   if (sp->name == NULL)
-    {
-      db_ws_free (sp);
+  {
+    db_ws_free(sp);
 
-      assert (er_errid () != NO_ERROR);
-      return er_errid ();
-    }
+    assert(er_errid() != NO_ERROR);
+    return er_errid();
+  }
   sp->next = user_savepoint_list;
   user_savepoint_list = sp;
 
@@ -1011,10 +1005,9 @@ tran_add_savepoint (const char *savept_name)
  * NOTE:free the entire user savepoint list.  Called during abort, commit, or
  * restart
  */
-void
-tran_free_savepoint_list (void)
+void tran_free_savepoint_list(void)
 {
-  nlist_free (user_savepoint_list);
+  nlist_free(user_savepoint_list);
   user_savepoint_list = NULL;
 }
 
@@ -1029,19 +1022,19 @@ tran_free_savepoint_list (void)
  * given savepoint.  Called during rollback to savepoint command.
  */
 static void
-tran_free_list_upto_savepoint (const char *savept_name)
+tran_free_list_upto_savepoint(const char *savept_name)
 {
   DB_NAMELIST *sp, *temp;
   bool found = false;
 
   /* first, check to see if it's in the list */
   for (sp = user_savepoint_list; sp && !found; sp = sp->next)
+  {
+    if (intl_mbs_casecmp(sp->name, savept_name) == 0)
     {
-      if (intl_mbs_casecmp (sp->name, savept_name) == 0)
-	{
-	  found = true;
-	}
+      found = true;
     }
+  }
 
   /* not 'found' is not necessarily an error.  We may be rolling back to a system-defined savepoint rather than a
    * user-defined savepoint.  In that case, the name would not appear on the user savepoint list and the list should be
@@ -1049,21 +1042,21 @@ tran_free_list_upto_savepoint (const char *savept_name)
    * latest atomic command and not overlap any user-defined savepoint.  That is, system invoked partial rollbacks
    * should never rollback farther than the last user-defined savepoint. */
   if (found == true)
+  {
+    for (sp = user_savepoint_list; sp;)
     {
-      for (sp = user_savepoint_list; sp;)
-	{
-	  if (intl_mbs_casecmp (sp->name, savept_name) == 0)
-	    {
-	      break;
-	    }
+      if (intl_mbs_casecmp(sp->name, savept_name) == 0)
+      {
+        break;
+      }
 
-	  temp = sp;
-	  sp = sp->next;
-	  db_ws_free ((char *) temp->name);
-	  db_ws_free (temp);
-	}
-      user_savepoint_list = sp;
+      temp = sp;
+      sp = sp->next;
+      db_ws_free((char *)temp->name);
+      db_ws_free(temp);
     }
+    user_savepoint_list = sp;
+  }
 }
 
 /*
@@ -1074,10 +1067,9 @@ tran_free_list_upto_savepoint (const char *savept_name)
  *   savept_name(in): Name of the savepoint
  *
  */
-int
-tran_system_savepoint (const char *savept_name)
+int tran_system_savepoint(const char *savept_name)
 {
-  return tran_savepoint_internal (savept_name, SYSTEM_SAVEPOINT);
+  return tran_savepoint_internal(savept_name, SYSTEM_SAVEPOINT);
 }
 
 /*
@@ -1104,42 +1096,41 @@ tran_system_savepoint (const char *savept_name)
  *              There are no limits on the number of savepoints that a
  *              transaction can have.
  */
-int
-tran_savepoint_internal (const char *savept_name, SAVEPOINT_TYPE savepoint_type)
+int tran_savepoint_internal(const char *savept_name, SAVEPOINT_TYPE savepoint_type)
 {
   LOG_LSA savept_lsa;
   int error_code = NO_ERROR;
 
   /* Flush all dirty objects */
-  if (ws_need_flush ())
+  if (ws_need_flush())
+  {
+    error_code = locator_all_flush();
+    if (error_code != NO_ERROR)
     {
-      error_code = locator_all_flush ();
-      if (error_code != NO_ERROR)
-	{
 #if defined(CUBRID_DEBUG)
-	  er_log_debug (ARG_FILE_LINE, "tran_savepoint: Unable to start a top operation\n Flush failed.\nerrmsg = %s",
-			er_msg ());
+      er_log_debug(ARG_FILE_LINE, "tran_savepoint: Unable to start a top operation\n Flush failed.\nerrmsg = %s",
+                   er_msg());
 #endif /* CUBRID_DEBUG */
-	  return error_code;
-	}
-    }
-
-  if (tran_server_savepoint (savept_name, &savept_lsa) != NO_ERROR)
-    {
-      assert (er_errid () != NO_ERROR);
-      error_code = er_errid ();
       return error_code;
     }
+  }
+
+  if (tran_server_savepoint(savept_name, &savept_lsa) != NO_ERROR)
+  {
+    assert(er_errid() != NO_ERROR);
+    error_code = er_errid();
+    return error_code;
+  }
 
   /* add savepoint to local list */
   if (savepoint_type == USER_SAVEPOINT)
+  {
+    error_code = tran_add_savepoint(savept_name);
+    if (error_code != NO_ERROR)
     {
-      error_code = tran_add_savepoint (savept_name);
-      if (error_code != NO_ERROR)
-	{
-	  return error_code;
-	}
+      return error_code;
     }
+  }
 
   return error_code;
 }
@@ -1152,10 +1143,9 @@ tran_savepoint_internal (const char *savept_name, SAVEPOINT_TYPE savepoint_type)
  *
  *   savepoint_name(in): Name of the savepoint
  */
-int
-tran_abort_upto_system_savepoint (const char *savepoint_name)
+int tran_abort_upto_system_savepoint(const char *savepoint_name)
 {
-  return tran_internal_abort_upto_savepoint (savepoint_name, SYSTEM_SAVEPOINT, false);
+  return tran_internal_abort_upto_savepoint(savepoint_name, SYSTEM_SAVEPOINT, false);
 }
 
 /*
@@ -1165,13 +1155,12 @@ tran_abort_upto_system_savepoint (const char *savepoint_name)
  *              there are client actions that need to be undone).
  *   savepoint_name(in): Name of the savepoint
  */
-int
-tran_abort_upto_user_savepoint (const char *savepoint_name)
+int tran_abort_upto_user_savepoint(const char *savepoint_name)
 {
   /* delete client's local copy of savepoint names back to here */
-  tran_free_list_upto_savepoint (savepoint_name);
+  tran_free_list_upto_savepoint(savepoint_name);
 
-  return tran_internal_abort_upto_savepoint (savepoint_name, USER_SAVEPOINT, false);
+  return tran_internal_abort_upto_savepoint(savepoint_name, USER_SAVEPOINT, false);
 }
 
 /*
@@ -1206,16 +1195,15 @@ tran_abort_upto_user_savepoint (const char *savepoint_name)
  *              workspace, the transaction will need to validate the objects
  *              that need to be accessed in the future.
  */
-int
-tran_internal_abort_upto_savepoint (const char *savepoint_name, SAVEPOINT_TYPE savepoint_type,
-				    bool client_decache_all_but_norealclasses)
+int tran_internal_abort_upto_savepoint(const char *savepoint_name, SAVEPOINT_TYPE savepoint_type,
+                                       bool client_decache_all_but_norealclasses)
 {
   int error_code = NO_ERROR;
   LOG_LSA savept_lsa;
   TRAN_STATE state;
 
   /* tell the schema manager to flush any transaction caches */
-  sm_transaction_boundary ();
+  sm_transaction_boundary();
 
   /*
    * We need to start all over since we do not know what set of objects are
@@ -1224,54 +1212,53 @@ tran_internal_abort_upto_savepoint (const char *savepoint_name, SAVEPOINT_TYPE s
    */
 
   if (client_decache_all_but_norealclasses == true)
-    {
-      ws_decache_allxlockmops_but_norealclasses ();
-      ws_filter_dirty ();
-    }
+  {
+    ws_decache_allxlockmops_but_norealclasses();
+    ws_filter_dirty();
+  }
   else
-    {
+  {
 #if defined(SA_MODE)
-      ws_clear ();
-#else /* SA_MODE */
-      /* Remove any dirty objects and remove any hints */
-      ws_abort_mops (false);
-      ws_filter_dirty ();
+    ws_clear();
+#else  /* SA_MODE */
+    /* Remove any dirty objects and remove any hints */
+    ws_abort_mops(false);
+    ws_filter_dirty();
 #endif /* SA_MODE */
-    }
+  }
 
-  state = tran_server_partial_abort (savepoint_name, &savept_lsa);
+  state = tran_server_partial_abort(savepoint_name, &savept_lsa);
   if (state != TRAN_UNACTIVE_ABORTED)
+  {
+    assert(er_errid() != NO_ERROR);
+    error_code = er_errid();
+    if (savepoint_type == SYSTEM_SAVEPOINT && state == TRAN_UNACTIVE_UNKNOWN && error_code != NO_ERROR && !tran_has_updated())
     {
-      assert (er_errid () != NO_ERROR);
-      error_code = er_errid ();
-      if (savepoint_type == SYSTEM_SAVEPOINT && state == TRAN_UNACTIVE_UNKNOWN && error_code != NO_ERROR
-	  && !tran_has_updated ())
-	{
-	  /*
-	   * maybe transaction has been unilaterally aborted by the system
-	   * and ER_LK_UNILATERALLY_ABORTED was overwritten by a consecutive error.
-	   */
-	  (void) tran_unilaterally_abort ();
-	}
-#if defined(CUBRID_DEBUG)
-      if (error_code != ER_TM_SERVER_DOWN_UNILATERALLY_ABORTED && error_code != ER_NET_SERVER_CRASHED)
-	{
-	  er_log_debug (ARG_FILE_LINE, "tm_abort_upto_savepoint: oper failed with state = %s %s",
-			log_state_string (state), " at client.\n");
-	}
-#endif /* CUBRID_DEBUG */
+      /*
+       * maybe transaction has been unilaterally aborted by the system
+       * and ER_LK_UNILATERALLY_ABORTED was overwritten by a consecutive error.
+       */
+      (void)tran_unilaterally_abort();
     }
+#if defined(CUBRID_DEBUG)
+    if (error_code != ER_TM_SERVER_DOWN_UNILATERALLY_ABORTED && error_code != ER_NET_SERVER_CRASHED)
+    {
+      er_log_debug(ARG_FILE_LINE, "tm_abort_upto_savepoint: oper failed with state = %s %s",
+                   log_state_string(state), " at client.\n");
+    }
+#endif /* CUBRID_DEBUG */
+  }
 
   return error_code;
 }
 
 static UINT64
-tran_current_timemillis (void)
+tran_current_timemillis(void)
 {
   struct timeval tv;
   UINT64 msecs;
 
-  gettimeofday (&tv, NULL);
+  gettimeofday(&tv, NULL);
   msecs = (tv.tv_sec * 1000) + (tv.tv_usec / 1000);
 
   return msecs;
@@ -1283,10 +1270,9 @@ tran_current_timemillis (void)
  *   query_timeout(in): timeout in milliseconds to be shipped to "query_execute_query"
  *                      and "query_prepare_and_execute_query"
  */
-void
-tran_set_query_timeout (int query_timeout)
+void tran_set_query_timeout(int query_timeout)
 {
-  tm_Query_begin = tran_current_timemillis ();
+  tm_Query_begin = tran_current_timemillis();
   tm_Query_timeout = query_timeout;
 }
 
@@ -1294,24 +1280,23 @@ tran_set_query_timeout (int query_timeout)
  * tran_get_query_timeout() -
  *   return: timeout (milliseconds)
  */
-int
-tran_get_query_timeout (void)
+int tran_get_query_timeout(void)
 {
   UINT64 elapsed;
   int timeout;
 
   if (tm_Query_timeout <= 0)
-    {
-      return 0;
-    }
+  {
+    return 0;
+  }
 
-  elapsed = tran_current_timemillis () - tm_Query_begin;
-  timeout = (int) (tm_Query_timeout - elapsed);
+  elapsed = tran_current_timemillis() - tm_Query_begin;
+  timeout = (int)(tm_Query_timeout - elapsed);
   if (timeout <= 0)
-    {
-      /* already expired */
-      timeout = -2;
-    }
+  {
+    /* already expired */
+    timeout = -2;
+  }
 
   return timeout;
 }
@@ -1319,8 +1304,7 @@ tran_get_query_timeout (void)
 /*
  * tran_begin_libcas_function() -
  */
-void
-tran_begin_libcas_function (void)
+void tran_begin_libcas_function(void)
 {
   tm_libcas_depth++;
 }
@@ -1329,20 +1313,18 @@ tran_begin_libcas_function (void)
  * tran_end_libcas_function() -
  *   return: void
  */
-void
-tran_end_libcas_function (void)
+void tran_end_libcas_function(void)
 {
   tm_libcas_depth--;
 
-  assert (tm_libcas_depth >= 0);
+  assert(tm_libcas_depth >= 0);
 }
 
 /*
  * tran_reset_libcas_function() -
  *   return: void
  */
-void
-tran_reset_libcas_function (void)
+void tran_reset_libcas_function(void)
 {
   tm_libcas_depth = 0;
 }
@@ -1351,8 +1333,7 @@ tran_reset_libcas_function (void)
  * tran_is_in_libcas() -
  *   return: bool
  */
-bool
-tran_is_in_libcas (void)
+bool tran_is_in_libcas(void)
 {
   return tm_libcas_depth > 0;
 }
@@ -1361,8 +1342,7 @@ tran_is_in_libcas (void)
  * tran_get_libcas_depth() -
  *   return: int
  */
-int
-tran_get_libcas_depth (void)
+int tran_get_libcas_depth(void)
 {
   return tm_libcas_depth;
 }
@@ -1372,8 +1352,7 @@ tran_get_libcas_depth (void)
  *   return:
  *   flag(in):
  */
-bool
-tran_set_check_interrupt (bool flag)
+bool tran_set_check_interrupt(bool flag)
 {
   bool old_val = true;
 
@@ -1387,8 +1366,7 @@ tran_set_check_interrupt (bool flag)
  * tran_get_check_interrupt() -
  *   return:
  */
-bool
-tran_get_check_interrupt (void)
+bool tran_get_check_interrupt(void)
 {
   return tm_Tran_check_interrupt;
 }
@@ -1417,44 +1395,41 @@ enum LATEST_QUERY_STATUS
  *
  *    Note : This function must be called after query execution with commit.
  */
-void
-tran_set_latest_query_status (int end_query_result, int tran_state, int should_conn_reset)
+void tran_set_latest_query_status(int end_query_result, int tran_state, int should_conn_reset)
 {
-  assert (!tran_was_latest_query_committed ());
+  assert(!tran_was_latest_query_committed());
 
-  tran_reset_latest_query_status ();
+  tran_reset_latest_query_status();
 
   if (end_query_result != NO_ERROR)
-    {
-      // it is active
-      return;
-    }
+  {
+    // it is active
+    return;
+  }
 
   tm_Tran_latest_query_status |= LATEST_QUERY_STATUS::QUERY_ENDED;
 
   if (tran_state == TRAN_UNACTIVE_COMMITTED || tran_state == TRAN_UNACTIVE_COMMITTED_INFORMING_PARTICIPANTS)
-    {
-      tm_Tran_latest_query_status |= LATEST_QUERY_STATUS::COMMITTED;
-    }
+  {
+    tm_Tran_latest_query_status |= LATEST_QUERY_STATUS::COMMITTED;
+  }
   else if (tran_state == TRAN_UNACTIVE_ABORTED || tran_state == TRAN_UNACTIVE_ABORTED_INFORMING_PARTICIPANTS)
-    {
-      tm_Tran_latest_query_status |= LATEST_QUERY_STATUS::ABORTED;
-    }
+  {
+    tm_Tran_latest_query_status |= LATEST_QUERY_STATUS::ABORTED;
+  }
 
   if (should_conn_reset != 0)
-    {
-      assert (tran_state == TRAN_UNACTIVE_COMMITTED || tran_state == TRAN_UNACTIVE_COMMITTED_INFORMING_PARTICIPANTS
-	      || tran_state == TRAN_UNACTIVE_ABORTED || tran_state == TRAN_UNACTIVE_ABORTED_INFORMING_PARTICIPANTS);
-      tm_Tran_latest_query_status |= LATEST_QUERY_STATUS::RESET_REQUIRED;
-    }
+  {
+    assert(tran_state == TRAN_UNACTIVE_COMMITTED || tran_state == TRAN_UNACTIVE_COMMITTED_INFORMING_PARTICIPANTS || tran_state == TRAN_UNACTIVE_ABORTED || tran_state == TRAN_UNACTIVE_ABORTED_INFORMING_PARTICIPANTS);
+    tm_Tran_latest_query_status |= LATEST_QUERY_STATUS::RESET_REQUIRED;
+  }
 }
 
 /*
  * tran_reset_latest_query_status : reset latest transaction query execution status
  *   return: nothing
  */
-void
-tran_reset_latest_query_status (void)
+void tran_reset_latest_query_status(void)
 {
   tm_Tran_latest_query_status = LATEST_QUERY_STATUS::NONE;
 }
@@ -1463,8 +1438,7 @@ tran_reset_latest_query_status (void)
  * tran_was_latest_query_ended : check whether latest query was ended
  *   return: true, if query ended
  */
-bool
-tran_was_latest_query_ended (void)
+bool tran_was_latest_query_ended(void)
 {
   return tm_Tran_latest_query_status & LATEST_QUERY_STATUS::QUERY_ENDED;
 }
@@ -1473,8 +1447,7 @@ tran_was_latest_query_ended (void)
  * tran_was_latest_query_committed : check whether latest query was executed with commit
  *   return: true, if query executed with commit
  */
-bool
-tran_was_latest_query_committed (void)
+bool tran_was_latest_query_committed(void)
 {
   return tm_Tran_latest_query_status & LATEST_QUERY_STATUS::COMMITTED;
 }
@@ -1483,8 +1456,7 @@ tran_was_latest_query_committed (void)
  * tran_was_latest_query_aborted : check whether latest query was aborted
  *   return: true, if query executed with abort
  */
-bool
-tran_was_latest_query_aborted (void)
+bool tran_was_latest_query_aborted(void)
 {
   return tm_Tran_latest_query_status & LATEST_QUERY_STATUS::ABORTED;
 }
@@ -1493,8 +1465,7 @@ tran_was_latest_query_aborted (void)
  * tran_is_reset_required : check whether reset is required
  *   return: true, if reset is required
  */
-bool
-tran_is_reset_required (void)
+bool tran_is_reset_required(void)
 {
   return tm_Tran_latest_query_status & LATEST_QUERY_STATUS::RESET_REQUIRED;
 }

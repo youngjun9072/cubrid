@@ -5429,6 +5429,10 @@ ws_clear_all_repl_objs (void)
  *
  *    return:
  */
+// repl 오브젝트를 생성하고 ws_Repl_objs리스트에 추가하며, 아이템의 수를 증가한다(ws_Repl_objs.num_items++).
+// repl 오브젝트는 ws_Repl_objs리스트에 추가된 후에 ws_free_repl_obj()를 통해서 해제된다.
+// packed_pkey_value 는 lrec->type 가 LOG_REPLICATION_DATA 또는 LOG_REPLICATION_STATEMENT 일 경우 
+// la_set_repl_log() 함수에 의해 생성된다. 
 int
 ws_add_to_repl_obj_list (OID * class_oid, char *packed_pkey_value, int packed_pkey_value_length, RECDES * recdes,
 			 int operation, bool has_index)

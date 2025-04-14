@@ -210,7 +210,9 @@ xtran_server_start_topop (THREAD_ENTRY * thread_p, LOG_LSA * topop_lsa)
    * Execute some few remaining actions before the start top nested action is
    * started by the log manager.
    */
+  // log manager 가 최상위 중첩 작업을 시작하기 전에 남은 몇가지 작업 수행
 
+  // 새로운 시스템 작업 시작
   log_sysop_start (thread_p);
   if (log_get_parent_lsa_system_op (thread_p, topop_lsa) == NULL)
     {

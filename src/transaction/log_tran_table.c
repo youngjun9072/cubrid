@@ -3138,6 +3138,17 @@ logtb_istran_finished (THREAD_ENTRY * thread_p, TRANID trid)
  * return:
  *
  */
+
+/*bool
+logtb_has_updated (THREAD_ENTRY * thread_p)
+{
+  LOG_TDES * tdes = LOG_FIND_TDES (LOG_FIND_THREAD_TRAN_INDEX (thread_p));
+  if (tdes != NULL && !LSA_ISNULL (&tdes->tail_lsa))
+    return true;
+  
+  return false;
+}*/
+// tdes 의 tail_lsa 가 NULL 이면 update 를 하지 않은 것
 bool
 logtb_has_updated (THREAD_ENTRY * thread_p)
 {
