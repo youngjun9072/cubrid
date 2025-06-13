@@ -2153,6 +2153,7 @@ net_client_request_with_logwr_context (LOGWR_CONTEXT * ctx_ptr, int request, cha
 	  switch (server_request)
 	    {
 	    case GET_NEXT_LOG_PAGES:
+      // 서버로부터 로그 페이지를 받아 로컬 버퍼에 저장
 	      {
 		int length;
 		ptr = or_unpack_int (ptr, (int *) (&length));
@@ -2160,6 +2161,7 @@ net_client_request_with_logwr_context (LOGWR_CONTEXT * ctx_ptr, int request, cha
 	      }
 	      break;
 	    case END_CALLBACK:
+      // 요청 처리 종료, 세미 싱크라면 로그 페이지를 강제로 플러시
 	      if (logwr_Gl.mode == LOGWR_MODE_SEMISYNC)
 		{
 		  logwr_Gl.force_flush = true;
@@ -2185,7 +2187,7 @@ net_client_request_with_logwr_context (LOGWR_CONTEXT * ctx_ptr, int request, cha
 
 	      ctx_ptr->shutdown = true;
 	      break;
-	    default:
+	    default: // 에러
 	      /* TODO: handle the unknown request as an error */
 	      if (logwr_Gl.mode == LOGWR_MODE_SEMISYNC)
 		{
@@ -2271,7 +2273,7 @@ net_client_get_next_log_pages (int rc, char *replybuf, int replysize, int length
       return ER_NET_SERVER_CRASHED;
     }
 
-  (void) css_queue_receive_data_buffer (rc, logwr_Gl.logpg_area, logwr_Gl.logpg_area_size);
+  (void) css_queue_receive_data_buffer (rc, logwr_Gl.logpg_area, logwr_Gl.logpg_area_size); // 버퍼 미리 예약
   error = css_receive_data_from_server (rc, &reply, &logwr_Gl.logpg_fill_size);
   if (error != NO_ERROR)
     {

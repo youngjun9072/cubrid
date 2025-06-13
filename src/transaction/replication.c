@@ -300,7 +300,7 @@ repl_log_insert (THREAD_ENTRY * thread_p, const OID * class_oid, const OID * ins
   char *class_name = NULL;
   char *ptr;
   int error = NO_ERROR, strlen;
-
+  // 트렌젝션 아이디를 이용해 트렌젝션 디스크립터 조회
   tran_index = LOG_FIND_THREAD_TRAN_INDEX (thread_p);
   tdes = LOG_FIND_TDES (tran_index);
   if (tdes == NULL)
@@ -309,6 +309,7 @@ repl_log_insert (THREAD_ENTRY * thread_p, const OID * class_oid, const OID * ins
     }
 
   /* If suppress_replication flag is set, do not write replication log. */
+  // 복제 억제 플래그가 설정되어있으면, 복제 로그를 기록하지 않고, tdes 내의 insert, update LSA를 초기화한다.
   if (tdes->suppress_replication != 0)
     {
       /* clear repl lsa in tdes since no replication log will be written */
@@ -324,6 +325,8 @@ repl_log_insert (THREAD_ENTRY * thread_p, const OID * class_oid, const OID * ins
     }
 
   /* check the replication log array status, if we need to alloc? */
+  // repl log가 존재하지 않는거나 가득 찼을 경우 repl_log_info_alloc 함수를 호출하여
+  // repl log를 할당한다. 이 때 두번째 파라미터는 realloc 여부이다. 
   if (REPL_LOG_IS_NOT_EXISTS (tran_index)
       && ((error = repl_log_info_alloc (tdes, REPL_LOG_INFO_ALLOC_SIZE, false)) != NO_ERROR))
     {
@@ -335,7 +338,9 @@ repl_log_insert (THREAD_ENTRY * thread_p, const OID * class_oid, const OID * ins
     {
       return error;
     }
-
+  // repl_rec 에 값들을 채운다.
+  // tdes->repl_records 는 repl_log_info_alloc 함수에 의해 미리 할당된 풀(?) 배열이다.
+  // repl_rec은 배열의 현재 인덱스에 위치한 LOG_REPL_RECORD 구조체를 가리킨다.
   repl_rec = (LOG_REPL_RECORD *) (&tdes->repl_records[tdes->cur_repl_record]);
   repl_rec->repl_type = log_type;
   repl_rec->tde_encrypted = false;
@@ -364,9 +369,10 @@ repl_log_insert (THREAD_ENTRY * thread_p, const OID * class_oid, const OID * ins
     {
       char *ptr_to_packed_key_value_size = NULL;
       int packed_key_len = 0;
-
+      
       if (heap_get_class_name (thread_p, class_oid, &class_name) != NO_ERROR || class_name == NULL)
 	{
+      // 클래스 이름 조회 실패시
 	  ASSERT_ERROR_AND_SET (error);
 	  if (error == NO_ERROR)
 	    {
@@ -375,7 +381,7 @@ repl_log_insert (THREAD_ENTRY * thread_p, const OID * class_oid, const OID * ins
 	    }
 	  return error;
 	}
-
+    // 암호화 알고리즘 반환?
       if (heap_get_class_tde_algorithm (thread_p, class_oid, &tde_algo) != NO_ERROR)
 	{
 	  ASSERT_ERROR_AND_SET (error);
@@ -391,7 +397,7 @@ repl_log_insert (THREAD_ENTRY * thread_p, const OID * class_oid, const OID * ins
       repl_rec->length = OR_INT_SIZE;	/* packed_key_value_size */
       repl_rec->length += or_packed_string_length (class_name, &strlen);
       repl_rec->length += OR_VALUE_ALIGNED_SIZE (key_dbvalue);
-
+      // 클래스 이름과 key_dbvalue 를 패킹
       ptr = (char *) malloc (repl_rec->length);
       if (ptr == NULL)
 	{
@@ -417,7 +423,7 @@ repl_log_insert (THREAD_ENTRY * thread_p, const OID * class_oid, const OID * ins
 
       /* fill the length of disk image of pk */
       or_pack_int (ptr_to_packed_key_value_size, packed_key_len);
-    }
+    } // if (log_type == LOG_REPLICATION_DATA)
   else
     {
       repl_rec->repl_data = NULL;

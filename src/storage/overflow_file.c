@@ -81,8 +81,8 @@ static int overflow_flush_internal (THREAD_ENTRY * thread_p, PAGE_PTR pgptr);
 int
 overflow_insert (THREAD_ENTRY * thread_p, const VFID * ovf_vfid, VPID * ovf_vpid, RECDES * recdes, FILE_TYPE file_type)
 {
-  OVERFLOW_FIRST_PART *first_part;
-  OVERFLOW_REST_PART *rest_parts;
+  OVERFLOW_FIRST_PART *first_part; // 첫번째 페이지, 전체 데이터 길이와 다음 페이지 포인터
+  OVERFLOW_REST_PART *rest_parts; // 나머지 페이지, 다음 페이지 포인터
   char *copyto;
   int length, copy_length;
   INT32 npages = 0;
@@ -109,6 +109,9 @@ overflow_insert (THREAD_ENTRY * thread_p, const VFID * ovf_vfid, VPID * ovf_vpid
   /*
    * Guess the number of pages. The total number of pages is found by dividing length by page size - the smallest
    * header. Then, we make sure that this estimate is correct. */
+  // 필요한 게피이지 수를 구함. 전체 데이터 길이 - 첫번째 페이지에 실제로 저장 가능한 데이터 공간
+  // 첫번째 페이지에 담을 수 없는 초과된 데이터 크기를 구한다. 초과된 데이터 크기가 0보다 작으면 페이지수는 1
+  // 초과된 데이터 크기가 0보다 크면 페이지수는 1 + (초과된 데이터 크기 / 페이지 크기 - 첫번째 페이지에 저장 가능한 데이터 공간)
   length = recdes->length - (DB_PAGESIZE - (int) offsetof (OVERFLOW_FIRST_PART, data));
   if (length > 0)
     {
@@ -121,6 +124,7 @@ overflow_insert (THREAD_ENTRY * thread_p, const VFID * ovf_vfid, VPID * ovf_vpid
     }
 
   if (npages > OVERFLOW_ALLOCVPID_ARRAY_SIZE)
+  // 필요한 페이지 수가 OVERFLOW_ALLOCVPID_ARRAY_SIZE보다 크면 미리 준비된 버퍼(vpids_buffer)를 사용하지 않고 동적 할당을 한다.
     {
       vpids = (VPID *) malloc ((npages + 1) * sizeof (VPID));
       if (vpids == NULL)

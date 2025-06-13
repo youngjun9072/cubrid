@@ -5307,6 +5307,7 @@ file_alloc (THREAD_ENTRY * thread_p, const VFID * vfid, FILE_INIT_PAGE_FUNC f_in
   else
     {
       /* start a nested system operation. we will end it with commit & undo. this must be atomic. */
+      // 시스템 트랜잭션 시작
       log_sysop_start_atomic (thread_p);
       is_sysop_started = true;
 
@@ -5473,7 +5474,7 @@ file_alloc_multiple (THREAD_ENTRY * thread_p, const VFID * vfid,
 
   is_temp = FILE_IS_TEMPORARY (fhead);
   if (!is_temp)
-    {
+    { // 임시 파일이 아닌경우, 시스템 연산 단위(log_sysop_start_atomic)로 묶어서 페이지 할당을 진행한다.
       assert (log_check_system_op_is_started (thread_p));
 
       /* start a system op. we may abort page allocations if an error occurs. */
@@ -5484,7 +5485,8 @@ file_alloc_multiple (THREAD_ENTRY * thread_p, const VFID * vfid,
   assert (FILE_IS_NUMERABLE (fhead) || vpids_out != NULL);
 
   for (iter = 0; iter < npages; iter++)
-    {
+    {// 페이지 반복 할당
+      // vpids_out가 NULL인 경우, local_vpid를 사용하여 페이지 할당
       vpid_iter = vpids_out ? vpids_out + iter : &local_vpid;
       error_code = file_alloc (thread_p, vfid, f_init, f_init_args, vpid_iter, NULL);
       if (error_code != NO_ERROR)

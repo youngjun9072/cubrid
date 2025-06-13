@@ -7750,6 +7750,7 @@ heap_get_mvcc_header(THREAD_ENTRY *thread_p, HEAP_GET_CONTEXT *context, MVCC_REC
  * thread_p (in)      : Thread entry.
  * context (in/out)   : Heap get context. Should contain all required information for object retrieving
  */
+// page fix와 slot의 위치, record type등을 알아낸 상태에서 REC_*** 의 타입에 따라 데이터 추출
 SCAN_CODE
 heap_get_record_data_when_all_ready(THREAD_ENTRY *thread_p, HEAP_GET_CONTEXT *context)
 {
@@ -7767,24 +7768,32 @@ heap_get_record_data_when_all_ready(THREAD_ENTRY *thread_p, HEAP_GET_CONTEXT *co
   switch (context->record_type)
   {
   case REC_RELOCATION:
+  // relocation인 경우 forward page에서 레코드를 가져와야함
     /* Don't peek REC_RELOCATION. */
+
+    // 복사 모드인데 메모리가 부족하면 새로 메모리를 할당해야함
     if (scan_cache_p != NULL && (context->ispeeking != 0 || context->recdes_p->data == NULL) && heap_scan_cache_allocate_recdes_data(thread_p, scan_cache_p, context->recdes_p, DB_PAGESIZE * 2) != NO_ERROR)
     {
       ASSERT_ERROR();
       return S_ERROR;
     }
-
+    // forward page에서 실제 레코드를 가져옴 
     return spage_get_record(thread_p, context->fwd_page_watcher.pgptr, context->forward_oid.slotid,
                             context->recdes_p, COPY);
   case REC_BIGONE:
+      // 오버플로우된 대형 레코드 처리 루틴
     return heap_get_bigone_content(thread_p, scan_cache_p, context->ispeeking, &context->forward_oid,
                                    context->recdes_p);
   case REC_HOME:
+  // 가장 일반적인 heap 레코드
+  
+  // 복사 모드이고 recdes가 비어있다면 recdes에 메모리를 할당해야함
     if (scan_cache_p != NULL && context->ispeeking == COPY && context->recdes_p->data == NULL && heap_scan_cache_allocate_recdes_data(thread_p, scan_cache_p, context->recdes_p, DB_PAGESIZE * 2) != NO_ERROR)
     {
       ASSERT_ERROR();
       return S_ERROR;
     }
+    // 실제 데이터를 가져옴
     return spage_get_record(thread_p, context->home_page_watcher.pgptr, context->oid_p->slotid, context->recdes_p,
                             context->ispeeking);
   default:
@@ -22412,13 +22421,19 @@ heap_update_home(THREAD_ENTRY *thread_p, HEAP_OPERATION_CONTEXT *context, bool i
 {
   int error_code = NO_ERROR;
   RECDES forwarding_recdes;
+  // 기존 홈 레코드가 업데이트 될 때 원래 데이터는 다른 위치로 옮기고, 포워딩 주소를 남기게 되는데, 그 데이터를 구성하는 구조체
   RECDES *home_page_updated_recdes_p = NULL;
+  // 실제 홈페이지에 적용될 최종 레코드
   OID forward_oid;
+  // 새 위치로 옮겨질 레코드의 OID
   LOG_RCVINDEX undo_rcvindex;
+  // undo 로그 기록을위한 인덱스 값
   LOG_LSA prev_version_lsa;
   PGBUF_WATCHER newhome_pg_watcher; /* fwd pg watcher required for heap_update_set_prev_version() */
+  // 새 홈 페이지가 필요한 경우(기존 페이지 공간 부족) 새로 할당된 페이지를 추적하기위한 watcher?
+  // heap_insert_newhome 호출시 사용됨
   PGBUF_WATCHER *newhome_pg_watcher_p = NULL;
-
+  // newhome_pg_watch의 포인터 주소를 담기 위한 변수
   LOG_TDES *tdes = NULL;
 
   assert(context != NULL);
@@ -22459,10 +22474,11 @@ heap_update_home(THREAD_ENTRY *thread_p, HEAP_OPERATION_CONTEXT *context, bool i
   else
 #endif /* SERVER_MODE */
   {
-    undo_rcvindex = RVHF_UPDATE;
+    undo_rcvindex = RVHF_UPDATE; // 아마 업데이트?
   }
 
-  if (heap_is_big_length(context->recdes_p->length))
+  if (heap_is_big_length(context->recdes_p->length)) 
+  // 새로 갱신할 레코드 크기가 크다면 ovf로 저장. heap_ovf_insert에서 수행됨
   {
     /* fix header page */
     error_code = heap_fix_header_page(thread_p, context);
@@ -22474,12 +22490,17 @@ heap_update_home(THREAD_ENTRY *thread_p, HEAP_OPERATION_CONTEXT *context, bool i
 
     /* insert new overflow record */
     HEAP_PERF_TRACK_PREPARE(thread_p, context);
+    // recdes_p 에 담긴 레코드 데이터를 overflow 페이지에 삽입
+    // 첫번째 페이지의 oid를 forward_oid에 담음
     if (heap_ovf_insert(thread_p, &context->hfid, &forward_oid, context->recdes_p) == NULL)
     {
       ASSERT_ERROR_AND_SET(error_code);
       goto exit;
     }
     /* redo lsa for SUPPLEMENT_UPDATE : REC_HOME to REC_BIGONE case */
+    // supplemental log가 필요한 경우 를 기록하기 위한 redo lsa 
+    // overflow 데이터를 기록한 후 redoLSA위치를 저장
+    // lsa는 나중에 복구 및 복제용으로 사용
     if (context->do_supplemental_log)
     {
       LSA_COPY(&context->supp_redo_lsa, &tdes->tail_lsa);
@@ -22487,14 +22508,18 @@ heap_update_home(THREAD_ENTRY *thread_p, HEAP_OPERATION_CONTEXT *context, bool i
 
     /* forwarding record is REC_BIGONE */
     heap_build_forwarding_recdes(&forwarding_recdes, REC_BIGONE, &forward_oid);
+    // 홈페이지에 저장할 forwarding 레코드를 생성
+    // 실제 데이터는 overflow에 있고 홈에는 forward_oid만 남김
 
     /* we'll be updating home with forwarding record */
     home_page_updated_recdes_p = &forwarding_recdes;
+    // 홈페이지에는 forwarding_recdes를 업데이트할 예정
 
     perfmon_inc_stat(thread_p, PSTAT_HEAP_HOME_TO_BIG_UPDATES);
   }
   else if (!spage_is_updatable(thread_p, context->home_page_watcher_p->pgptr, context->oid.slotid,
                                context->recdes_p->length))
+                               // 홈 페이지 내에서 새 레코드를 추가할 수 없어 새 홈레코드를 삽입
   {
     /* insert new home */
 
@@ -22538,7 +22563,7 @@ heap_update_home(THREAD_ENTRY *thread_p, HEAP_OPERATION_CONTEXT *context, bool i
 
     perfmon_inc_stat(thread_p, PSTAT_HEAP_HOME_TO_REL_UPDATES);
   }
-  else
+  else // 홈에서 그대로 삽입가능한 경우
   {
     context->recdes_p->type = REC_HOME;
 
@@ -23332,6 +23357,7 @@ heap_update_logical(THREAD_ENTRY *thread_p, HEAP_OPERATION_CONTEXT *context)
   /*
    * Get location
    */
+  //oid 를 이용해 실제 페이지 위치, 슬롯 정보를 가져온다
   rc = heap_get_record_location(thread_p, context);
   if (rc != NO_ERROR)
   {
@@ -23345,6 +23371,7 @@ heap_update_logical(THREAD_ENTRY *thread_p, HEAP_OPERATION_CONTEXT *context)
   /*
    * Fetch record
    */
+  // 레코드 타입을 가져온다.
   context->record_type = spage_get_record_type(context->home_page_watcher_p->pgptr, context->oid.slotid);
   if (context->record_type == REC_UNKNOWN)
   {
@@ -23399,6 +23426,7 @@ heap_update_logical(THREAD_ENTRY *thread_p, HEAP_OPERATION_CONTEXT *context)
   /*
    * Update record
    */
+  // 기존 레코드 타입에 따른 연산
   switch (context->record_type)
   {
   case REC_RELOCATION:
@@ -25139,6 +25167,7 @@ end:
  *
  * NOTE: Caller must handle the cleanup of context
  */
+// heap object 의 최신 버전을 가져오는 함수(mvcc snapshot 고려 안함)  
 SCAN_CODE
 heap_get_last_version(THREAD_ENTRY *thread_p, HEAP_GET_CONTEXT *context)
 {
@@ -25149,14 +25178,17 @@ heap_get_last_version(THREAD_ENTRY *thread_p, HEAP_GET_CONTEXT *context)
   assert(context->recdes_p != NULL);
 
   if (context->scan_cache && context->ispeeking == COPY)
+  // 스캔캐시가 있고, ispeeking 이 COPY 인 경우
+  //(copy 와 peek 의 차이점은 COPY 는 recdes 를 새로 할당해서 사용하고, PEEK 는 기존 recdes 를 사용함)
   {
     /* Allocate an area to hold the object. Assume that the object will fit in two pages for not better estimates. */
+    // 레코드를 저장할 메모리를 할당하며, 예상 크기는 페이지의 2배 크기이다(넉넉하게). 메모리 부족으로 실패시 에러
     if (heap_scan_cache_allocate_area(thread_p, context->scan_cache, DB_PAGESIZE * 2) != NO_ERROR)
     {
       return S_ERROR;
     }
   }
-
+  // 실제 레코드가 저장된 페이지와 슬롯을 fixgkrh,record type 확인
   scan = heap_prepare_get_context(thread_p, context, false, LOG_WARNING_IF_DELETED);
   if (scan != S_SUCCESS)
   {
@@ -25165,6 +25197,7 @@ heap_get_last_version(THREAD_ENTRY *thread_p, HEAP_GET_CONTEXT *context)
   assert(context->record_type == REC_HOME || context->record_type == REC_BIGONE || context->record_type == REC_RELOCATION);
   assert(context->record_type == REC_HOME || (!OID_ISNULL(&context->forward_oid) && context->fwd_page_watcher.pgptr != NULL));
 
+  // mvcc snapshot 이 존재하고, snapshot 함수가 존재하는 경우 mvcc_header 를 가져옴
   scan = heap_get_mvcc_header(thread_p, context, &mvcc_header);
   if (scan != S_SUCCESS)
   {
@@ -25175,12 +25208,16 @@ heap_get_last_version(THREAD_ENTRY *thread_p, HEAP_GET_CONTEXT *context)
   {
     /* Object version didn't change and CHN is up-to-date. Don't get record data and return
      * S_SUCCESS_CHN_UPTODATE instead. */
+    // 객체 버전이 변경되지 않았꼬, chn(???)이 최신이므로, 
+    // 레코드 데이터를 읽지 않고 s_success_chn_up_to_date 리턴
     scan = S_SUCCESS_CHN_UPTODATE;
     goto exit;
   }
 
   if (context->recdes_p != NULL)
   {
+    // 실제 레코드 데이터를 읽어오는 함수
+    // 데이터는 context 내의 records_p 에 저장됨
     scan = heap_get_record_data_when_all_ready(thread_p, context);
   }
 

@@ -3794,6 +3794,7 @@ spage_previous_record(PAGE_PTR page_p, PGSLOTID *out_slot_id_p, RECDES *record_d
  *       as a negative value in record_descriptor_p->length and an error is
  *       indicated in the return value.
  */
+// slotted page 에서 레코드를 읽어오는 함수
 SCAN_CODE
 spage_get_record(THREAD_ENTRY *thread_p, PAGE_PTR page_p, PGSLOTID slot_id, RECDES *record_descriptor_p,
                  int is_peeking)
@@ -3816,7 +3817,7 @@ spage_get_record(THREAD_ENTRY *thread_p, PAGE_PTR page_p, PGSLOTID slot_id, RECD
            pgbuf_get_volume_label(page_p));
     return S_DOESNT_EXIST;
   }
-
+  // 실질적인 레코드 추출
   return spage_get_record_data(page_p, sptr, record_descriptor_p, is_peeking);
 }
 
@@ -3842,7 +3843,7 @@ spage_get_record_data(PAGE_PTR page_p, SPAGE_SLOT *slot_p, RECDES *record_descri
    * onto the area specified by the descriptor
    */
   if (is_peeking == PEEK)
-  {
+  { // peek의 경우 데이터를 복사하지 않고 page 내부의 record offset을 그대로 사용
     record_descriptor_p->area_size = -1;
     record_descriptor_p->data = (char *)page_p + slot_p->offset_to_record;
   }
@@ -3851,6 +3852,7 @@ spage_get_record_data(PAGE_PTR page_p, SPAGE_SLOT *slot_p, RECDES *record_descri
     /* copy the record */
     if (record_descriptor_p->area_size < 0 || record_descriptor_p->area_size < (int)slot_p->record_length)
     {
+    // 복사할 버퍼 크기가 부족하면 복사 불가
       /*
        * DOES NOT FIT
        * Give a hint to the user of the needed length. Hint is given as a
@@ -3862,6 +3864,7 @@ spage_get_record_data(PAGE_PTR page_p, SPAGE_SLOT *slot_p, RECDES *record_descri
     }
 
     if (SPAGE_OVERFLOW(slot_p->offset_to_record + slot_p->record_length))
+    // 오버플로우(페이지 경계 초과) 체크
     {
       er_set(ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_GENERIC_ERROR, 0);
       assert_release(false);
@@ -4525,7 +4528,7 @@ spage_find_slot(PAGE_PTR page_p, SPAGE_HEADER *page_header_p, PGSLOTID slot_id, 
 
   assert(page_p != NULL);
   SPAGE_VERIFY_HEADER(page_header_p);
-
+  // 페이지의 맨 끝에서부터 slot_id 만큼 역산해 해당 슬롯의 위치를 찾는다.
   slot_p = (SPAGE_SLOT *)(page_p + SPAGE_DB_PAGESIZE - sizeof(SPAGE_SLOT));
   slot_p -= slot_id;
 

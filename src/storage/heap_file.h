@@ -252,9 +252,9 @@ typedef enum
 
 enum update_inplace_style
 {
-  UPDATE_INPLACE_NONE = 0,	/* None */
-  UPDATE_INPLACE_CURRENT_MVCCID = 1,	/* non-MVCC in-place update style with current MVCC ID. */
-  UPDATE_INPLACE_OLD_MVCCID = 2	/* non-MVCC in-place update style with old MVCC ID. Preserves old MVCC ID */
+  UPDATE_INPLACE_NONE = 0,	/* None */ // inplace 업데이트가 아님
+  UPDATE_INPLACE_CURRENT_MVCCID = 1,	/* non-MVCC in-place update style with current MVCC ID. */ // MVCC를 사용하지 않는 인플레이스, 현재 MVCC ID를 사용
+  UPDATE_INPLACE_OLD_MVCCID = 2	/* non-MVCC in-place update style with old MVCC ID. Preserves old MVCC ID */ // MVCC를 사용하지 않는 인플레이스, 이전 MVCC ID를 사용
 };
 typedef enum update_inplace_style UPDATE_INPLACE_STYLE;
 

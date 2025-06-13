@@ -1106,6 +1106,8 @@ la_log_fetch(LOG_PAGEID pageid, LA_CACHE_BUFFER *cache_buffer)
   {
     /* TODO: refactor read the target page */
     // 페이지 아이디가 archive에 있는지 확인,
+    // la_info_act_log.log_hdr->append_lsa.pageid가 pageid보다 작으면 이미 archive에 있는 페이지이므로
+        // archive에서 읽어온다.
     if (LA_LOG_IS_IN_ARCHIVE(pageid))
     {
       /* read from the archive log file */
@@ -3030,6 +3032,9 @@ la_log_copy_fromlog(char *rec_type, char *area, int *length, LOG_PAGEID log_page
 
   /* filter the record type */
   /* NOTES : in case of overflow page, we don't need to fetch the rectype */
+  // 레코드 타입이 존재할 경우, 로그 시작 위치에서 2바이트를 읽어 rec_type에 저장한다.
+  // 한 페이지에 다 안담기는 경우를 고려해 조각 복사, 
+  // length는 전체 길이 복사인데, rec_type는 2바이트만 복사하고, sizeof(INT16)만큼 감소시킨다.
   // 로그 페이지의 데이터 영역에서 로그의 위치(area + log_offset)의 값을 rec_type + area_offset(0)에 복사한다.
   // -> 타입복사
   while (rec_type != NULL && rec_length > 0)
@@ -4331,24 +4336,24 @@ la_get_overflow_recdes(LOG_RECORD_HEADER *log_record, void *logs, RECDES *recdes
   int error = NO_ERROR;
   int length = 0;
 
-  LSA_COPY(&current_lsa, &log_record->prev_tranlsa);
+  LSA_COPY(&current_lsa, &log_record->prev_tranlsa); // 현재 레코드의 이전 트랜잭션 로그 주소로 이동해 연결된 오버플로우 로그를 추적
   prev_vpid.pageid = ((LOG_REC_UNDOREDO *)logs)->data.pageid;
   prev_vpid.volid = ((LOG_REC_UNDOREDO *)logs)->data.volid;
 
-  while (!LSA_ISNULL(&current_lsa))
+  while (!LSA_ISNULL(&current_lsa)) // 오버플로우 데이터 읽기
   {
     current_log_page = la_get_page(current_lsa.pageid);
     current_log_record = LOG_GET_LOG_RECORD_HEADER(current_log_page, &current_lsa);
 
     if (current_log_record->trid != log_record->trid || current_log_record->type == LOG_DUMMY_OVF_RECORD)
-    {
+    { // 트랜잭션 ID가 일치하지 않거나 더미 오버플로우 레코드인 경우
       la_release_page_buffer(current_lsa.pageid);
       break;
     }
     else if (LOG_IS_REDO_RECORD_TYPE(current_log_record->type) == true)
     {
       /* process only LOG_REDO_DATA */
-
+      // redo 레코드 타입인 경우 
       ovf_list_data = (LA_OVF_PAGE_LIST *)malloc(DB_SIZEOF(LA_OVF_PAGE_LIST));
       if (ovf_list_data == NULL)
       {
@@ -4368,6 +4373,7 @@ la_get_overflow_recdes(LOG_RECORD_HEADER *log_record, void *logs, RECDES *recdes
       }
 
       memset(ovf_list_data, 0, DB_SIZEOF(LA_OVF_PAGE_LIST));
+      // 지정된 lsa의 로그 데이터를 읽어 data와 length 로 변환
       error =
           la_get_log_data(current_log_record, &current_lsa, current_log_page, rcvindex, NULL, &log_info, NULL,
                           &ovf_list_data->data, &ovf_list_data->length);
@@ -4375,6 +4381,7 @@ la_get_overflow_recdes(LOG_RECORD_HEADER *log_record, void *logs, RECDES *recdes
       if (error == NO_ERROR && log_info && ovf_list_data->data)
       {
         /* add to linked-list */
+        // 역순으로 리스트 구성, 가장 마지막 데이터가 가장 먼저 오도록
         if (ovf_list_head == NULL)
         {
           ovf_list_head = ovf_list_tail = ovf_list_data;
@@ -4385,7 +4392,7 @@ la_get_overflow_recdes(LOG_RECORD_HEADER *log_record, void *logs, RECDES *recdes
           ovf_list_head = ovf_list_data;
         }
 
-        length += ovf_list_data->length;
+        length += ovf_list_data->length; // 전체 길이 증가
       }
       else
       {
@@ -4397,12 +4404,12 @@ la_get_overflow_recdes(LOG_RECORD_HEADER *log_record, void *logs, RECDES *recdes
       }
     }
     la_release_page_buffer(current_lsa.pageid);
-    LSA_COPY(&current_lsa, &current_log_record->prev_tranlsa);
+    LSA_COPY(&current_lsa, &current_log_record->prev_tranlsa); // prev를 타고 역행
   }
 
   assert(recdes != NULL);
 
-  error = la_realloc_recdes_data(recdes, length);
+  error = la_realloc_recdes_data(recdes, length); // 복원된 전체 길이만큼 recdes->data를 재할당
   if (error != NO_ERROR)
   {
     /* malloc failed: clear linked-list */
@@ -4682,7 +4689,8 @@ la_get_recdes(LOG_LSA *lsa, LOG_PAGE *pgptr, RECDES *recdes, unsigned int *rcvin
   // pg 의 데이터 영역 + offset 으로 가져오려는 로그의 해더 주소로 접근한다.
   pg = pgptr;
   lrec = LOG_GET_LOG_RECORD_HEADER(pg, lsa);
-
+  // 로그 내용 조회 및 파싱
+  // 추출 내용: recdes->data, recdes->length, rcvindex, logs, rec_type
   error = la_get_log_data(lrec, lsa, pg, 0, rcvindex, &logs, &rec_type, &recdes->data, &recdes->length);
 
   if (error == NO_ERROR && logs != NULL)
@@ -4706,16 +4714,19 @@ la_get_recdes(LOG_LSA *lsa, LOG_PAGE *pgptr, RECDES *recdes, unsigned int *rcvin
   if (*rcvindex == RVOVF_CHANGE_LINK)
   {
     /* if overflow page update */
+    // 오버플로우 
     error = la_get_overflow_recdes(lrec, logs, recdes, RVOVF_PAGE_UPDATE);
     recdes->type = REC_BIGONE;
   }
   else if (recdes->type == REC_BIGONE)
   {
     /* if overflow page insert */
+    // 오버플로우 기록의 경우 실제 데이터를 다시 읽어와야함
     error = la_get_overflow_recdes(lrec, logs, recdes, RVOVF_NEWPAGE_INSERT);
   }
   else if (*rcvindex == RVHF_INSERT && recdes->type == REC_ASSIGN_ADDRESS)
   {
+    // Insert(RVHF_INSERT) 로그 레코드의 경우 주소 할당만 발생한 것이므로 다음 로그를 더 읽어와야함
     error = la_get_next_update_log(lrec, pg, &logs, &rec_type, &recdes->data, &recdes->length);
     if (error == NO_ERROR)
     {
@@ -4728,6 +4739,7 @@ la_get_recdes(LOG_LSA *lsa, LOG_PAGE *pgptr, RECDES *recdes, unsigned int *rcvin
   }
   else if ((*rcvindex == RVHF_UPDATE || *rcvindex == RVHF_UPDATE_NOTIFY_VACUUM) && recdes->type == REC_RELOCATION)
   {
+    //relocation 로그 레코드의 경우 실제 데이터를 다시 읽어와야함
     error = la_get_relocation_recdes(lrec, pg, 0, &logs, &rec_type, recdes);
     if (error == NO_ERROR)
     {
@@ -4737,6 +4749,7 @@ la_get_recdes(LOG_LSA *lsa, LOG_PAGE *pgptr, RECDES *recdes, unsigned int *rcvin
 
   if (*rcvindex == RVHF_MVCC_INSERT && recdes->type != REC_BIGONE)
   {
+      // mvcc insert 로그 레코드이면서 빅원이 아닌 경우 mvcc insid를 설정해야함 => 데이터가 한 페이지 내에 다 있는경우
     la_make_room_for_mvcc_insid(recdes);
   }
 
@@ -4952,7 +4965,7 @@ la_flush_repl_items(bool immediate)
  *    recdes(in): record to be inserted
  */
 static int
-wla_repl_add_object(MOP classop, LA_ITEM *item, RECDES *recdes)
+la_repl_add_object(MOP classop, LA_ITEM *item, RECDES *recdes)
 {
   int error = NO_ERROR;
   SM_CLASS *class_;
@@ -5356,7 +5369,7 @@ la_apply_insert_log(LA_ITEM *item)
   // 아이템의 target_lsa 에는 pageid와 offset만 들어있으므로
   // std::int64_t pageid:48;		/* Log page identifier : 6 bytes length */
   // std::int64_t offset:16;		/* Offset in page : 2 bytes length.
-  // 버퍼에 캐되어있거나, act 파일에 있는 실제 데이터의 주소를 가져와야한다.
+  // 버퍼에 캐시되어있거나, act 파일에 있는 실제 데이터의 주소를 가져와야한다.
   // 파일의 내용을 캐시 버퍼로 읽고 캐시 버퍼의 로그페이지 주소를 pgptr 에 저장한다.
 
   old_pageid = item->target_lsa.pageid;
@@ -5521,6 +5534,36 @@ end:
  *              number of affected objects, if a success
  *   sql(in)
  */
+
+/*static int 
+la_update_query_execute(const char *sql, bool au_disable)
+{
+  int ret, au_save;
+  DB_QUERY_RESULT *result;
+  DB_QUERY_ERROR query_error;
+
+  er_log_debug(ARG_FILE_LINE, "update_query_execute : %s\n", sql);
+
+  /* in order to update 'db_ha_info', disable authorization temporarily */
+  /*if (au_disable)
+    AU_DISABLE(au_save);
+
+  ret = db_execute(sql, &result, &query_error);
+  if (ret < 0)
+    goto end;
+
+
+  ret = db_query_error(result);
+  if (ret != NO_ERROR)
+    goto end;
+
+end:
+  if (au_disable)
+    AU_ENABLE(au_save);
+
+  return ret;
+}*/
+
 static int
 la_update_query_execute(const char *sql, bool au_disable)
 {

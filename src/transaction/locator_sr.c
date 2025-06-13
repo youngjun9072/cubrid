@@ -5263,6 +5263,10 @@ error2:
  * been set to be used by the receiving class when it went through the pruning
  * algorithm (see function partition_find_partition_for_record)
  */
+// 이 함수는 현재 객체의 oid에 대해 locator_delete_force를 호출하고, 전달받은 recdes에 대해 locator_insert_force를 호출한다.
+// 레코드는 이미 pruning 알고리즘을 거치면서 수신 대상 클래스에서 사용될 수 있도록 설정되어있다.
+// 먼저 객체를 삭제(locator_delete_force)하고, recdes를 새 클래스에 삽입(locator_insert_force)한다.
+// 이 함수는 partitioned class에서 레코드를 재배치하는 역할을 한다.
 static int
 locator_move_record(THREAD_ENTRY *thread_p, HFID *old_hfid, OID *old_class_oid, OID *obj_oid, OID *new_class_oid,
 					HFID *new_class_hfid, RECDES *recdes, HEAP_SCANCACHE *scan_cache, int op_type, int has_index,
@@ -5363,6 +5367,15 @@ locator_move_record(THREAD_ENTRY *thread_p, HFID *old_hfid, OID *old_class_oid, 
  * Note: The given object is updated on this heap and all appropriate
  *              index entries are updated.
  */
+// 1. 레코드로부터 클래스 이름 추출
+// 2. db저장 클래스 이름 조회
+// 3. 다르면 modified class list에 추가
+// 4. 시스템 카탈로그 캐시 사용이 true이면 내부 시스템 카탈로그도 함께 갱신
+// 5. 클래스 레코드 업데이트
+// 6. representation directory oid가 없는 경우 기존 oid로부터 representation directory oid를 추출
+// 7. representation directory oid가 있는 경우 representation directory oid를 recdes에 저장
+// 8. 클래스 레코드 업데이트
+
 static int
 locator_update_force(THREAD_ENTRY *thread_p, HFID *hfid, OID *class_oid, OID *oid, RECDES *oldrecdes,
 					 RECDES *recdes, int has_index, ATTR_ID *att_id, int n_att_id, int op_type,
@@ -5406,13 +5419,15 @@ locator_update_force(THREAD_ENTRY *thread_p, HFID *hfid, OID *class_oid, OID *oi
 	repl_info.need_replication = true;
 	repl_info.info = NULL;
 
-	if (OID_IS_ROOTOID(class_oid))
+	if (OID_IS_ROOTOID(class_oid))  // root oid 클래스 오브젝트
 	{
+
 		HEAP_OPERATION_CONTEXT update_context;
 
 		if (!OID_IS_ROOTOID(oid))
 		{
 			/* Prevent any update on a TDE-encryted class if TDE is not loaded */
+                        // 암호화(TDE) 되어있는 경우 TDE 모듈이 로드되어있지 않으면 update 금지
 			or_class_tde_algorithm(recdes, &tde_algo);
 			if (tde_algo != TDE_ALGORITHM_NONE && !tde_is_loaded())
 			{
@@ -5426,10 +5441,13 @@ locator_update_force(THREAD_ENTRY *thread_p, HFID *hfid, OID *class_oid, OID *oi
 		 * A CLASS: classes do not have any indices...however, the classname
 		 * to oid table may need to be updated
 		 */
+                // 클래스 이름 추출
 		classname = or_class_name(recdes);
 		assert(classname != NULL);
 		assert(strlen(classname) < DB_MAX_IDENTIFIER_LENGTH);
-
+                // 기존 class name 과 비교, 
+                // 만약 기존 class name 과 다르면, 기존 class name 을 modified class list 에 추가
+                // 차이가 있을때만 malloc으로 old_classname에 할당
 		if (heap_get_class_name_alloc_if_diff(thread_p, oid, classname, &old_classname) != NO_ERROR)
 		{
 			/* it is unexpected to fail to get the classname of an existing class */
@@ -5441,6 +5459,7 @@ locator_update_force(THREAD_ENTRY *thread_p, HFID *hfid, OID *class_oid, OID *oi
 		 * Compare the classname pointers. If the same pointers classes are the
 		 * same since the class was no malloc
 		 */
+                // 기존과 현재의 클래스 이름이 다른경우 클래스 이름이 변경된 것이고, 변경된 클래스를 복제 시스템등에 알려주기위해 list 추가
 		if (old_classname != NULL && old_classname != classname)
 		{
 			assert(old_classname != NULL);
@@ -5453,7 +5472,7 @@ locator_update_force(THREAD_ENTRY *thread_p, HFID *hfid, OID *class_oid, OID *oi
 				goto error;
 			}
 		}
-
+                // 시스템 카탈로그 캐시 사용이 true이면 내부 시스템 카탈로그도 함께 갱신
 		if ((catcls_Enable == true) && (old_classname != NULL))
 		{
 			error_code = catcls_update_catalog_classes(thread_p, old_classname, recdes, oid, force_in_place);
@@ -5467,8 +5486,10 @@ locator_update_force(THREAD_ENTRY *thread_p, HFID *hfid, OID *class_oid, OID *oi
 		if (!OID_IS_ROOTOID(oid))
 		{
 			or_class_rep_dir(recdes, &rep_dir);
+                       
 
 			if (OID_ISNULL(&rep_dir))
+                        // 현재 업데이트 하려는 recdes에 representation directory oid가 없는 경우
 			{
 				OID old_rep_dir = {NULL_PAGEID, NULL_SLOTID, NULL_VOLID};
 				RECDES old_record, *old_recdes;
@@ -5478,8 +5499,9 @@ locator_update_force(THREAD_ENTRY *thread_p, HFID *hfid, OID *class_oid, OID *oi
 
 				if (heap_get_class_record(thread_p, oid, old_recdes, scan_cache, PEEK) == S_SUCCESS)
 				{
+                                  // 디스크에서 이 클래스 오브젝트를 peek으로 읽어옴
 					or_class_rep_dir(old_recdes, &old_rep_dir);
-
+                                      // 만약 기존 recdes가 있고, rep_dir이 정상 존재하면 new_recdec(recdes) 에 old_rep_dir 저장
 					/* save current oid of the representation directory */
 					if (!OID_ISNULL(&old_rep_dir))
 					{
@@ -5494,6 +5516,7 @@ locator_update_force(THREAD_ENTRY *thread_p, HFID *hfid, OID *class_oid, OID *oi
 				else
 				{
 					/* ignore if the class hasn't been flushed yet */
+                                    // 아직 플러시 되지 않은 데이터일수 있으므로 무시
 					if (er_errid() == ER_HEAP_NODATA_NEWADDRESS)
 					{
 						er_clear(); /* clear ER_HEAP_NODATA_NEWADDRESS */
@@ -5501,9 +5524,16 @@ locator_update_force(THREAD_ENTRY *thread_p, HFID *hfid, OID *class_oid, OID *oi
 				}
 			}
 		}
-
+                // update_context 생성
+                // hfid: 업데이트 힙파일 id
+                // oid: 업데이트할 오브젝트 oid
+                // class_oid: 업데이트할 클래스 oid
+                // recdes: 업데이트할 레코드
 		heap_create_update_context(&update_context, hfid, oid, class_oid, recdes, scan_cache,
 								   UPDATE_INPLACE_CURRENT_MVCCID);
+                // 논리적 업데이트 수행
+                // 실제 데이터 페이지에 object를 업데이트
+                // 힙 내부에 있는 슬롯을 찾아 in-place 혹은 replocate로 업데이트
 		error_code = heap_update_logical(thread_p, &update_context);
 		if (error_code != NO_ERROR)
 		{
@@ -5525,19 +5555,20 @@ locator_update_force(THREAD_ENTRY *thread_p, HFID *hfid, OID *class_oid, OID *oi
 			goto error;
 		}
 		isold_object = update_context.is_logical_old;
-
-		if (update_context.is_logical_old)
+                // 초기 레코드가 REC_ASSIGN_ADDRESS가 아닌 경우 ture(처음 할당일때가 assign인듯)
+                // 내용만 있고 주소가 없는 경우가 REC_ASSIGN_ADDRESS 
+		if (update_context.is_logical_old) // REC_ASSIGN_ADDRESS 가 아닌 경우 (내용과 주소가 모두 있는 경우))
 		{
 			/* Update the catalog and hfid cache as long as it is not the root class */
 			if (!OID_IS_ROOTOID(oid))
 			{
 #if !defined(NDEBUG)
-				or_class_rep_dir(recdes, &rep_dir);
+				or_class_rep_dir(recdes, &rep_dir); // 레코드에 들어있는 클래스의 representation directory oid를 rep_dir에 저장
 				assert(!OID_ISNULL(&rep_dir));
 #endif
 				HFID new_hfid = HFID_INITIALIZER;
 
-				or_class_hfid(recdes, &new_hfid);
+				or_class_hfid(recdes, &new_hfid); // 레코드에 들어있는 힙파일의 id추출
 
 				/* if the hfid for the class is cached, and it is different from the NEW one, delete the previouse one. The new one is cached when it is accessed for the first time */
 				if (!HFID_IS_NULL(&new_hfid))
@@ -5545,11 +5576,12 @@ locator_update_force(THREAD_ENTRY *thread_p, HFID *hfid, OID *class_oid, OID *oi
 					HFID cached_hfid = HFID_INITIALIZER;
 					bool was_cached = false;
 					error_code = heap_get_hfid_if_cached(thread_p, oid, &cached_hfid, NULL, NULL, &was_cached);
+                                        // 캐시가 되어있다면 조회, 캐시가 되어있지 않다면 실패
 					if (error_code != NO_ERROR)
 					{
 						goto error;
 					}
-					if (was_cached && !HFID_EQ(&cached_hfid, &new_hfid))
+					if (was_cached && !HFID_EQ(&cached_hfid, &new_hfid)) // 캐시된 hfid 와 새로 추출된 hfid가 다르면 캐시된 hfid 삭제
 					{
 						error_code = heap_delete_hfid_from_cache(thread_p, oid);
 						if (error_code != NO_ERROR)
@@ -5558,7 +5590,7 @@ locator_update_force(THREAD_ENTRY *thread_p, HFID *hfid, OID *class_oid, OID *oi
 						}
 					}
 				}
-
+                              // 카탈로그 업데이트 수행
 				error_code = catalog_update(thread_p, recdes, oid);
 				if (error_code < 0)
 				{
@@ -5572,14 +5604,18 @@ locator_update_force(THREAD_ENTRY *thread_p, HFID *hfid, OID *class_oid, OID *oi
 		else
 		{
 			/*
-			 * NEW CLASS
+			 * NEW CLASS 새 클래스 삽입
 			 */
-			if (!OID_IS_ROOTOID(oid))
+			if (!OID_IS_ROOTOID(oid)) // 루트 클래스는 건너 뜀
 			{
 				HEAP_OPERATION_CONTEXT update_context;
 				or_class_rep_dir(recdes, &rep_dir);
-				assert(OID_ISNULL(&rep_dir));
+				assert(OID_ISNULL(&rep_dir)); // 새로 생성된 클래스라면 아직 representation directory oid가 없음
+                                // representaion directory 
+                                // 이 클래스의 필드 정보, 저장 포맷 등 클래스 레이아웃을 설명하는 별도의 내부 오브젝트
+                                // 오브젝트 클래스로 둬서 클래스 변경시 복잡성을 줄임
 
+                                // 시스템 카탈로그에 클래스 등록, 삽입에 성공하면 rep_dir에 oid가 저장됨
 				if (catalog_insert(thread_p, recdes, oid, &rep_dir) < 0)
 				{
 					/*
@@ -5593,11 +5629,12 @@ locator_update_force(THREAD_ENTRY *thread_p, HFID *hfid, OID *class_oid, OID *oi
 				assert(!OID_ISNULL(&rep_dir));
 
 				/* save oid of the representation directory */
+                                // recdes에 representation directory oid 저장 
 				rep_dir_offset =
 					(char *)recdes->data + OR_FIXED_ATTRIBUTES_OFFSET(recdes->data, ORC_CLASS_VAR_ATT_COUNT) + ORC_REP_DIR_OFFSET;
 
 				OR_PUT_OID(rep_dir_offset, &rep_dir);
-
+                                  // 업데이트 컨텍스트를 얻고 로직적 업데이트 수행
 				heap_create_update_context(&update_context, hfid, oid, class_oid, recdes, scan_cache,
 										   UPDATE_INPLACE_CURRENT_MVCCID);
 				error_code = heap_update_logical(thread_p, &update_context);
@@ -5627,6 +5664,7 @@ locator_update_force(THREAD_ENTRY *thread_p, HFID *hfid, OID *class_oid, OID *oi
 
 			if (catcls_Enable == true)
 			{
+                          // 새로운 클래스를 생성했으므로 이 클래스 정보를 시스템 카탈로그에 반영
 				error_code = catcls_insert_catalog_classes(thread_p, recdes);
 				if (error_code != NO_ERROR)
 				{
@@ -5648,21 +5686,23 @@ locator_update_force(THREAD_ENTRY *thread_p, HFID *hfid, OID *class_oid, OID *oi
 			fpcache_remove_by_class(thread_p, oid);
 		}
 	}
-	else
+	else// 일반 오브젝트인경우 
 	{
 		HEAP_OPERATION_CONTEXT update_context;
 
 		local_scan_cache = scan_cache;
-		if (pruning_type != DB_NOT_PARTITIONED_CLASS && pcontext != NULL)
+		if (pruning_type != DB_NOT_PARTITIONED_CLASS && pcontext != NULL) // 파티셔닝이 적용된 경우
 		{
 			/* Get a scan_cache object for the actual class which is updated. This object is kept in a list in the
 			 * pruning context */
+                        /* 실제로 갱신되는 클래스에 대한 scan_cache 객체를 가져온다. 이 객체는 pruning context 내의 리스트에 보관된다. */
 			OID real_class_oid;
 			HFID real_hfid;
 			PRUNING_SCAN_CACHE *pcache;
 
 			HFID_COPY(&real_hfid, hfid);
 			COPY_OID(&real_class_oid, class_oid);
+                        //해당 파티션을 찾아 알맞은 파티션의 스캔캐시를 리턴 현재 업데이트 대상이 되는 실제 파티션 HFID에 맞는 스캔 캐시로 갱신
 			pcache = locator_get_partition_scancache(pcontext, &real_class_oid, &real_hfid, op_type, false);
 			if (pcache == NULL)
 			{
@@ -5682,23 +5722,27 @@ locator_update_force(THREAD_ENTRY *thread_p, HFID *hfid, OID *class_oid, OID *oi
 				{
 					/* The new recdes can be changed during reevaluation. That's because new recdes fields may refer
 					 * fields of old recdes */
+                                        // 재평가되는 과정에서 새로운 recdes가 변경될 수 있다.
+                                        // 이는 새 recdes 필드가 기존 recdes 필드를 참조할 수 있기 때문이다.
 					mvcc_reev_data->upddel_reev_data->new_recdes = recdes;
 				}
 
 				if (need_locking)
 				{
+          // 락이 필요한 경우에는 locator_lock_and_get_object_with_evaluation를 사용하여 락을 걸고 객체를 읽어오고 재평가까지 수행
+          // 읽어온 데이터는 copy_recdes에 저장
 					scan = locator_lock_and_get_object_with_evaluation(thread_p, oid, class_oid, &copy_recdes,
 																	   local_scan_cache, COPY, NULL_CHN, mvcc_reev_data,
 																	   LOG_ERROR_IF_DELETED);
 				}
-				else
+				else // 락이 필요 없으면 단순히 mvcc 스냅샷을 기반으로 현재 보이는 객체 버전을 읽어옴
 				{
 					scan = heap_get_visible_version(thread_p, oid, class_oid, &copy_recdes, local_scan_cache, COPY,
 													NULL_CHN);
 				}
 
 				if (scan == S_SUCCESS && mvcc_reev_data != NULL && mvcc_reev_data->filter_result == V_FALSE)
-				{
+				{ // 스캔은 성공했지만 mvcc재평가 결과가 실패라면 에러
 					return ER_MVCC_NOT_SATISFIED_REEVALUATION;
 				}
 				else if (scan != S_SUCCESS)
@@ -5737,22 +5781,26 @@ locator_update_force(THREAD_ENTRY *thread_p, HFID *hfid, OID *class_oid, OID *oi
 				}
 				else
 				{
-					oldrecdes = &copy_recdes;
+					oldrecdes = &copy_recdes; // 정상적으로 읽어왔다면 oldrecdes를 읽어온 복사본으로 설정하여 이후 업데이트 작업을 지속
 				}
 			}
 
 			if (!HEAP_IS_UPDATE_INPLACE(force_in_place))
 			{
+                                // 현재 업데이트가 in-place 업데이트가 아닌 경우(즉, 기존 레코드를 덮어쓰지 않고 새로운 레코드를 생성하는 경우)
 				LOG_TDES *tdes;
 
-				tdes = LOG_FIND_CURRENT_TDES(thread_p);
-				if (!(has_index & LC_FLAG_HAS_UNIQUE_INDEX))
+				tdes = LOG_FIND_CURRENT_TDES(thread_p); // 현재 트랜잭션의 로그 디스크립터를 가져옴
+				if (!(has_index & LC_FLAG_HAS_UNIQUE_INDEX)) // 유니크 인덱스가 없는 경우 락 보장 상태를 직접 확인해야함
 				{
 					MVCC_REC_HEADER old_rec_header;
 
-					or_mvcc_get_header(oldrecdes, &old_rec_header);
+					or_mvcc_get_header(oldrecdes, &old_rec_header); // 업데이트할 레코드의 MVCC 헤더를 가져옴
 					if (logtb_find_current_mvccid(thread_p) != old_rec_header.mvcc_ins_id)
-					{
+					{ 
+            // 현재 특랜잭션이 ins_id와 다르면, 즉 현재 트랜잭션이 이 레코드를 업데이트한 트랜잭션이 아니라면
+            // 현재 트랜젝션 mvccid를 반환받고 mvcc_insert_id 와 비교(이 레코드를 삽입한 트랜잭션 id)와 비교
+            // 즉 삽입자가 아니라면 다른 트랜잭션이 만든 레코드이므로 락을 확인해야함.
 #if defined(SERVER_MODE)
 						/* If not inserted by me, I must have lock. */
 						assert(lock_has_lock_on_object(oid, class_oid, X_LOCK) > 0);
@@ -5762,35 +5810,39 @@ locator_update_force(THREAD_ENTRY *thread_p, HFID *hfid, OID *class_oid, OID *oi
 			}
 			else if (force_in_place == UPDATE_INPLACE_OLD_MVCCID)
 			{
+        // Inplace 인 경우
 				MVCC_REC_HEADER old_rec_header, new_rec_header;
-
+                          // 기존 레코드와 새 레코드 둘 다 mvcc 헤더를 파싱해 각자의 헤어 자료구조에 담음
 				if (or_mvcc_get_header(oldrecdes, &old_rec_header) != NO_ERROR || or_mvcc_get_header(recdes, &new_rec_header) != NO_ERROR)
 				{
+          
 					goto error;
 				}
 
-				if (MVCC_IS_FLAG_SET(&old_rec_header, OR_MVCC_FLAG_VALID_INSID))
+				if (MVCC_IS_FLAG_SET(&old_rec_header, OR_MVCC_FLAG_VALID_INSID)) // 기존 레코드가 insert_mvccid 가 유요하면
 				{
+          // 신규 레코드 헤더에 동일하게 복사
 					MVCC_SET_FLAG_BITS(&new_rec_header, OR_MVCC_FLAG_VALID_INSID);
 					MVCC_SET_INSID(&new_rec_header, MVCC_GET_INSID(&old_rec_header));
 				}
-				else
+				else // 기존 레코드가 insert_mvccid 가 유효하지 않으면
 				{
 					MVCC_CLEAR_FLAG_BITS(&new_rec_header, OR_MVCC_FLAG_VALID_INSID);
 				}
 
-				if (MVCC_IS_HEADER_DELID_VALID(&old_rec_header))
+				if (MVCC_IS_HEADER_DELID_VALID(&old_rec_header)) // 기존 레코드가 delete_id가 유효하면
 				{
+          // 신규 레코드에 동일하게 복사
 					MVCC_SET_FLAG_BITS(&new_rec_header, OR_MVCC_FLAG_VALID_DELID);
 					MVCC_SET_DELID(&new_rec_header, MVCC_GET_DELID(&old_rec_header));
 				}
-				else
+				else // 기존 레코드가 delete_id가 유효하지 않으면(삭제되었으면)
 				{
 					MVCC_CLEAR_FLAG_BITS(&new_rec_header, OR_MVCC_FLAG_VALID_DELID);
 				}
 
-				if (MVCC_IS_FLAG_SET(&old_rec_header, OR_MVCC_FLAG_VALID_PREV_VERSION))
-				{
+				if (MVCC_IS_FLAG_SET(&old_rec_header, OR_MVCC_FLAG_VALID_PREV_VERSION)) // 만약 이전 버전에 lsa가 기록되어있으면
+				{// 값 유지
 					MVCC_SET_FLAG_BITS(&new_rec_header, OR_MVCC_FLAG_VALID_PREV_VERSION);
 					MVCC_SET_PREVIOUS_VERSION_LSA(&new_rec_header, &MVCC_GET_PREV_VERSION_LSA(&old_rec_header));
 				}
@@ -5799,26 +5851,26 @@ locator_update_force(THREAD_ENTRY *thread_p, HFID *hfid, OID *class_oid, OID *oi
 					MVCC_CLEAR_FLAG_BITS(&new_rec_header, OR_MVCC_FLAG_VALID_PREV_VERSION);
 				}
 
-				if (or_mvcc_set_header(recdes, &new_rec_header) != NO_ERROR)
+				if (or_mvcc_set_header(recdes, &new_rec_header) != NO_ERROR) // 변경된 mvcc header를 recdes에 저장
 				{
 					goto error;
 				}
 			}
 		}
-		else
+		else // mvcc_is_mvcc_disabled_class(class_oid)
 		{
-			if (!HEAP_IS_UPDATE_INPLACE(force_in_place))
+			if (!HEAP_IS_UPDATE_INPLACE(force_in_place)) 
 			{
 				force_in_place = UPDATE_INPLACE_CURRENT_MVCCID;
 			}
 
-			if (lock_object(thread_p, oid, class_oid, X_LOCK, LK_UNCOND_LOCK) != LK_GRANTED)
+			if (lock_object(thread_p, oid, class_oid, X_LOCK, LK_UNCOND_LOCK) != LK_GRANTED) // 업데이트를 위해 오브젝트 락 획득
 			{
 				ASSERT_ERROR_AND_SET(error_code);
 				goto error;
 			}
 
-			if (has_index && oldrecdes == NULL)
+			if (has_index && oldrecdes == NULL) // 인덱스가 존재하고, old record가 준비되어 있지 않은 경우 기존의 값을 읽어와야함
 			{
 				/* get the old record first */
 				local_scan_cache->mvcc_snapshot = logtb_get_mvcc_snapshot(thread_p);
@@ -5831,7 +5883,7 @@ locator_update_force(THREAD_ENTRY *thread_p, HFID *hfid, OID *class_oid, OID *oi
 					}
 					goto error;
 				}
-
+                                // 기존 old 레코드를 읽어옴 
 				scan =
 					heap_get_visible_version(thread_p, oid, class_oid, &copy_recdes, local_scan_cache, COPY, NULL_CHN);
 				if (scan == S_SUCCESS)
@@ -5869,7 +5921,7 @@ locator_update_force(THREAD_ENTRY *thread_p, HFID *hfid, OID *class_oid, OID *oi
 			}
 		}
 
-		if (pruning_type != DB_NOT_PARTITIONED_CLASS)
+		if (pruning_type != DB_NOT_PARTITIONED_CLASS) // 파티션 테이블에 대해 update(update로 인해 파티션 이동이 필요한 경우)
 		{
 			OID real_class_oid;
 			HFID real_hfid;
@@ -5877,6 +5929,8 @@ locator_update_force(THREAD_ENTRY *thread_p, HFID *hfid, OID *class_oid, OID *oi
 
 			HFID_COPY(&real_hfid, hfid);
 			COPY_OID(&real_class_oid, class_oid);
+      // 파티션 이동 판단
+      // 리턴값(real_class_oid, real_hfid 는 이동대상 파티션
 			error_code =
 				partition_prune_update(thread_p, class_oid, recdes, pcontext, pruning_type, &real_class_oid, &real_hfid,
 									   &superclass_oid);
@@ -5887,22 +5941,25 @@ locator_update_force(THREAD_ENTRY *thread_p, HFID *hfid, OID *class_oid, OID *oi
 
 			/* make sure we use the correct class oid - we could be dealing with a classoid resulted from a unique btid
 			 * pruning */
+      // 현재 업데이트 대상이 되는 클래스 oid를 확인
 			if (heap_get_class_oid(thread_p, oid, class_oid) != S_SUCCESS)
 			{
 				ASSERT_ERROR_AND_SET(error_code);
 				goto error;
 			}
-
+// class_oid에 해당하는 hfid 확인
 			if (heap_get_class_info(thread_p, class_oid, hfid, NULL, NULL) != NO_ERROR)
 			{
 				goto error;
 			}
 
-			if (!OID_EQ(class_oid, &real_class_oid))
+			if (!OID_EQ(class_oid, &real_class_oid)) // 파티션 이동이 필요한 경우
 			{
 				/* If we have to move the record to another partition, we have to lock the target partition for insert.
 				 * The class from which we delete was already locked (X_LOCK for heap scan or IX_LOCK for index scan)
 				 * during the SELECT phase of UPDATE */
+        // 만약 레코드가 다른 파티션으로 이동해야한다면, 삽입을 위해 대상 파티션에대해 Lock을 획득해야함
+        // 삭제할 파티션은 이미 updte의 select 단계에서 lock이 획득되어있음
 				granted = lock_subclass(thread_p, &real_class_oid, &superclass_oid, IX_LOCK, LK_UNCOND_LOCK);
 				if (granted != LK_GRANTED)
 				{
@@ -5914,7 +5971,7 @@ locator_update_force(THREAD_ENTRY *thread_p, HFID *hfid, OID *class_oid, OID *oi
 					}
 					goto error;
 				}
-
+// 실질적인 파티션 이동 수행
 				error_code =
 					locator_move_record(thread_p, hfid, class_oid, oid, &real_class_oid, &real_hfid, recdes, scan_cache,
 										op_type, has_index, force_count, pcontext, mvcc_reev_data, need_locking);
@@ -5931,7 +5988,9 @@ locator_update_force(THREAD_ENTRY *thread_p, HFID *hfid, OID *class_oid, OID *oi
 		if (has_index)
 		{
 			if (scan == S_SUCCESS)
-			{
+			{// 기존 레코드를 정상적으로 읽어온 경우
+                          // oldrecdes와 recdes를 비교해 인덱스 갱신
+                        // 변경된컬럼에 인덱스가 포함된 경우, 기존 인덱스 엔트리에서 삭제 후 새 엔트리 삽입
 				error_code =
 					locator_update_index(thread_p, recdes, oldrecdes, att_id, n_att_id, oid, class_oid, op_type,
 										 local_scan_cache, &repl_info);
@@ -5945,7 +6004,7 @@ locator_update_force(THREAD_ENTRY *thread_p, HFID *hfid, OID *class_oid, OID *oi
 					goto error;
 				}
 			}
-			else
+			else // 기존 레코드를 읽어오지 못한 경우
 			{
 				/*
 				 * We could not get the object.
@@ -5953,14 +6012,14 @@ locator_update_force(THREAD_ENTRY *thread_p, HFID *hfid, OID *class_oid, OID *oi
 				 * (no content) is known by the heap manager.
 				 */
 
-				if (no_data_new_address)
+				if (no_data_new_address) // 레코드 데이터 없이 새 주소만 생성된 신규 레코드(heap manager에 의해 주소만 할당)
 				{
 					er_clear(); /* clear the error code */
 					if (op_type == SINGLE_ROW_MODIFY)
 					{ /* to enable uniqueness checking */
-						op_type = SINGLE_ROW_INSERT;
+						op_type = SINGLE_ROW_INSERT; // 인덱스는 새로 생성해줘야하므로 insert
 					}
-
+                // 원래는 update이지만 데이터가 새로 들어가는 경우 insert로 변경
 					error_code =
 						locator_add_or_remove_index(thread_p, recdes, oid, class_oid, true, op_type, local_scan_cache,
 													true, true, hfid, NULL, false, false);
@@ -5973,7 +6032,8 @@ locator_update_force(THREAD_ENTRY *thread_p, HFID *hfid, OID *class_oid, OID *oi
 			}
 
 			/* check the foreign key constraints */
-			if (!not_check_fk && !locator_Dont_check_foreign_key)
+			if (!not_check_fk && !locator_Dont_check_foreign_key) 
+      // foreign key constraints 사용 여부 확인
 			{
 				error_code =
 					locator_check_foreign_key(thread_p, hfid, class_oid, oid, recdes, &new_record, &is_cached,
@@ -5989,7 +6049,7 @@ locator_update_force(THREAD_ENTRY *thread_p, HFID *hfid, OID *class_oid, OID *oi
 				}
 			}
 		}
-
+                // 컨텍스트를 생성하고 논리적 업데이트 수행
 		heap_create_update_context(&update_context, hfid, oid, class_oid, recdes, local_scan_cache, force_in_place);
 		error_code = heap_update_logical(thread_p, &update_context);
 		if (error_code != NO_ERROR)
@@ -6008,6 +6068,7 @@ locator_update_force(THREAD_ENTRY *thread_p, HFID *hfid, OID *class_oid, OID *oi
 			}
 			goto error;
 		}
+    // isold_object가 true이면 기존 오브젝트 업데이트, false면 새로 삽입된 오브젝트
 		isold_object = update_context.is_logical_old;
 
 		/*
@@ -6016,7 +6077,7 @@ locator_update_force(THREAD_ENTRY *thread_p, HFID *hfid, OID *class_oid, OID *oi
 		 * The target log info was already created when the locator_update_index
 		 */
 		if (!LOG_CHECK_LOG_APPLIER(thread_p) && log_does_allow_replication() == true && repl_info.need_replication == true)
-		{
+		{ // 복제 대상이면 update에 해당하는 replication lsa를 기록
 			repl_add_update_lsa(thread_p, oid);
 		}
 
@@ -6028,9 +6089,9 @@ locator_update_force(THREAD_ENTRY *thread_p, HFID *hfid, OID *class_oid, OID *oi
 #endif
 
 		/* remove query result cache entries which are relevant with this class */
-		if (!QFILE_IS_LIST_CACHE_DISABLED)
+		if (!QFILE_IS_LIST_CACHE_DISABLED) 
 		{
-			if (qexec_clear_list_cache_by_class(thread_p, class_oid) != NO_ERROR)
+			if (qexec_clear_list_cache_by_class(thread_p, class_oid) != NO_ERROR) // 해당 class의 쿼리 캐시 제거
 			{
 				er_log_debug(ARG_FILE_LINE,
 							 "locator_update_force: qexec_clear_list_cache_by_class failed for class { %d %d %d }\n",
@@ -6038,7 +6099,7 @@ locator_update_force(THREAD_ENTRY *thread_p, HFID *hfid, OID *class_oid, OID *oi
 			}
 			if (!OID_ISNULL(&superclass_oid) && !OID_EQ(&superclass_oid, class_oid))
 			{
-				qmgr_add_modified_class(thread_p, &superclass_oid);
+				qmgr_add_modified_class(thread_p, &superclass_oid); // modified class list에 슈퍼클래스 oid 추가
 			}
 			qmgr_add_modified_class(thread_p, class_oid);
 		}
@@ -7322,7 +7383,7 @@ error:
  *   attr_info(in/out): Attribute information
  *                      (Set as a side effect to fill the rest of values)
  *   old_recdes(in): The old representation of the object or NULL if this is a
- *                   new object (to be inserted).
+ *                   new object (to be inserted). // 변환 대상 객체의 기존 디스크 형태 저장. 만약 새로 삽입하는 객체라면 이 값은 null이 된다.
  *   new_recdes(in): The resulting new representation of the object.
  *   copyarea_length_hint(in): An estimated size for the LC_COPYAREA or -1 if
  *                             an estimated size is not known.
@@ -7330,12 +7391,13 @@ error:
  *
  * Note: The allocated should be freed by using locator_free_copy_area ()
  */
+// 속성 정보를 기반으로 디스크에 저장할 수 있는 레코드 디스크 포맷으로 변환하고, 저장할 LC_COPYAREA(copyarea) 에 동적으로 할당
 LC_COPYAREA *
 locator_allocate_copy_area_by_attr_info(THREAD_ENTRY *thread_p, HEAP_CACHE_ATTRINFO *attr_info, RECDES *old_recdes,
 										RECDES *new_recdes, const int copyarea_length_hint, int lob_create_flag)
 {
 	LC_COPYAREA *copyarea = NULL;
-	int copyarea_length = copyarea_length_hint <= 0 ? DB_PAGESIZE : copyarea_length_hint;
+	int copyarea_length = copyarea_length_hint <= 0 ? DB_PAGESIZE : copyarea_length_hint; // 힌트가 있으면 그 값을 사용하고, 없으면 DB_PAGESIZE를 사용
 	SCAN_CODE scan = S_DOESNT_FIT;
 	// *INDENT-OFF*
 	record_descriptor build_record(cubmem::CSTYLE_BLOCK_ALLOCATOR);
@@ -7343,7 +7405,7 @@ locator_allocate_copy_area_by_attr_info(THREAD_ENTRY *thread_p, HEAP_CACHE_ATTRI
 
 	new_recdes->data = NULL;
 	new_recdes->area_size = 0;
-
+        //copyarea에 메모리 할당
 	copyarea = locator_allocate_copy_area_by_length(copyarea_length);
 	if (copyarea == NULL)
 	{
@@ -7352,10 +7414,11 @@ locator_allocate_copy_area_by_attr_info(THREAD_ENTRY *thread_p, HEAP_CACHE_ATTRI
 
 	assert(copyarea->length > 0);
 	build_record.set_external_buffer(copyarea->mem, (size_t)copyarea->length);
-
+        // new recdes 값을 초기화한다. 방금 할당한 copyarea의 메모리 주소를 data로 설정하고, area_size를 copyarea의 길이로 설정한다.
 	new_recdes->data = copyarea->mem;
 	new_recdes->area_size = copyarea->length;
-
+        
+        // lob 포함여부에 따라 다른 함수 호출
 	if (lob_create_flag == LOB_FLAG_EXCLUDE_LOB)
 	{
 		scan = heap_attrinfo_transform_to_disk_except_lob(thread_p, attr_info, old_recdes, &build_record);
@@ -7452,6 +7515,7 @@ int locator_attribute_info_force(THREAD_ENTRY *thread_p, const HFID *hfid, OID *
 	 * While scanning objects, the given scancache does not fix the last
 	 * accessed page. So, the object must be copied to the record descriptor.
 	 */
+        // 객체를 스캔하는 동안, 전달된 scancache는 마지막으로 접근한 페이지를 고정하지 않으므로 객체를 레코드 디스크립터에 복사해야한다.
 	copy_recdes.data = NULL;
 
 	/* Backup the provided class_oid and class_hfid because the locator actions bellow will change them if this is a
@@ -7477,6 +7541,7 @@ int locator_attribute_info_force(THREAD_ENTRY *thread_p, const HFID *hfid, OID *
 
 			/* don't consider visiblity, just get the last version of the object */
 			heap_init_get_context(thread_p, &context, oid, &class_oid, &copy_recdes, scan_cache, COPY, NULL_CHN);
+                       // 전달된 파라미터로 context 초기화. page watcher??? 설정
 			scan = heap_get_last_version(thread_p, &context);
 			heap_clean_get_context(thread_p, &context);
 
@@ -7487,6 +7552,9 @@ int locator_attribute_info_force(THREAD_ENTRY *thread_p, const HFID *hfid, OID *
 			/* The oid has been already locked in select phase, however need to get the last object that may differ by
 			 * the current one in case that transaction updates same OID many times during command execution */
 			/* TODO: investigate if this is still true */
+                        /* OID는 select 단계에서 이미 잠겼지만, 명령 실행 중에 트랜잭션이 동일한 OID를 여러 번 업데이트하는 경우
+			 * 현재 객체와 다를 수 있으므로 마지막 객체를 가져와야 한다 */
+			/* TODO: 이것이 여전히 유효한지 조사 필요 */
 			if (scan_cache && scan_cache->mvcc_snapshot != NULL)
 			{
 				/* Why is snapshot set to NULL? */
@@ -7501,7 +7569,7 @@ int locator_attribute_info_force(THREAD_ENTRY *thread_p, const HFID *hfid, OID *
 				scan_cache->mvcc_snapshot = saved_mvcc_snapshot;
 			}
 		}
-
+                // scan 변수(코드)는 사실상 에러 핸들링만 수행하고 insert에서는 아무 작업도 하지 않음
 		if (scan == S_SUCCESS)
 		{
 			/* do nothing for the moment */
@@ -7542,6 +7610,8 @@ int locator_attribute_info_force(THREAD_ENTRY *thread_p, const HFID *hfid, OID *
 	case LC_FLUSH_INSERT_PRUNE:
 	case LC_FLUSH_INSERT_PRUNE_VERIFY:
 		copyarea =
+                        // 속성 정보를이용해 디스크에 저장될 수 있는 레코드 형태로 변환하고, 이 레코드를 저장할 수 있는 메모리를 할당해 반환
+                        // 디스크에 쓸 수 있는 포맷이 new_recdes에 담김
 			locator_allocate_copy_area_by_attr_info(thread_p, attr_info, old_recdes, &new_recdes, -1,
 													LOB_FLAG_INCLUDE_LOB);
 		if (copyarea == NULL)
@@ -7570,7 +7640,9 @@ int locator_attribute_info_force(THREAD_ENTRY *thread_p, const HFID *hfid, OID *
 			{
 				has_index |= LC_FLAG_HAS_UNIQUE_INDEX;
 			}
-
+                        // old_recdes 는 scancache에 의해서 채워져있고, 
+                        // new_recdes는 case insert 시작 직후 locator_allocate_copy_area_by_attr_info() 함수에 의해 체워져있음
+                        //
 			error_code =
 				locator_update_force(thread_p, &class_hfid, &class_oid, oid, old_recdes, &new_recdes, has_index,
 									 att_id, n_att_id, op_type, scan_cache, force_count, not_check_fk, repl_info,
@@ -7784,6 +7856,10 @@ locator_add_or_remove_index_internal(THREAD_ENTRY *thread_p, RECDES *recdes, OID
 	 *  Populate the index_attrinfo structure.
 	 *  Return the number of indexed attributes found.
 	 */
+        // 인덱스를 기반으로 어트리뷰트를 초기화하는 함수, 인덱스를 구성하는 컬럼 값들을 읽기 위해 필요한 구조체 설정
+        // 특정 클래스에대해 인덱스 컬럼들의 어트리뷰트 정보를 초기화하고, HEAP_CACHE_ATTRINFO, HEAP_IDX_ELEMENTS_INFO 구조체에 값을 채움
+        // index_attrinfo에 어트리뷰트 정보가 저장됨.
+        // idx_info 인덱스 구조가 저장됨
 	num_found = heap_attrinfo_start_with_index(thread_p, class_oid, NULL, &index_attrinfo, &idx_info, false);
 	num_btids = idx_info.num_btids;
 
@@ -7802,6 +7878,8 @@ locator_add_or_remove_index_internal(THREAD_ENTRY *thread_p, RECDES *recdes, OID
 	 *
 	 *  Read the values of the indexed attributes
 	 */
+        // 인덱스가 존재하며, 인덱스 관련 어트리뷰트 정보가 초기화 된 상태,
+        // 인덱스 컬럼들에 해당하는 속성 값들을 실제 레코드로부터 읽어옴
 	if (idx_info.has_single_col)
 	{
 		error_code = heap_attrinfo_read_dbvalues(thread_p, inst_oid, recdes, &index_attrinfo);
@@ -7830,12 +7908,14 @@ locator_add_or_remove_index_internal(THREAD_ENTRY *thread_p, RECDES *recdes, OID
 
 	for (i = 0; i < num_btids; i++)
 	{
-		index = &(index_attrinfo.last_classrepr->indexes[i]);
-		or_pred = index->filter_predicate;
-		if (or_pred && or_pred->pred_stream)
+                
+		index = &(index_attrinfo.last_classrepr->indexes[i]); // 현재 익덱스 정보를 클래스 리프레젠테이션에서 가져옴
+		or_pred = index->filter_predicate;// 인덱스에 연결된 필터조건식을 조회
+		if (or_pred && or_pred->pred_stream) // 조건식이 존재하고 해당 조건을 평가(?) 할 수 있는 byte stream이 존재할 때만 실행
 		{
 			error_code =
 				locator_eval_filter_predicate(thread_p, &index->btid, or_pred, class_oid, &inst_oid, 1, &recdes, &ev_res);
+                      
 			if (error_code == ER_FAILED)
 			{
 				goto error;
@@ -7849,6 +7929,7 @@ locator_add_or_remove_index_internal(THREAD_ENTRY *thread_p, RECDES *recdes, OID
 		 *  Generate a B-tree key contained in a DB_VALUE and return a
 		 *  pointer to it.
 		 */
+                // 인덱스 컬럼에 해당하는 속성 값들을 읽어와서 DB_VALUE 형태로 변환하고 포인터로 반환
 		key_dbvalue =
 			heap_attrvalue_get_key(thread_p, i, &index_attrinfo, recdes, &btid, &dbvalue, aligned_buf,
 								   (func_preds ? &func_preds[i] : NULL), NULL, inst_oid, false);
@@ -7858,7 +7939,7 @@ locator_add_or_remove_index_internal(THREAD_ENTRY *thread_p, RECDES *recdes, OID
 			goto error;
 		}
 
-		if (i < 1 || !locator_was_index_already_applied(&index_attrinfo, &index->btid, i))
+		if (i < 1 || !locator_was_index_already_applied(&index_attrinfo, &index->btid, i)) // 인덱스가 0 이하거나 해당 작업이 적용되지 않은경우
 		{
 			if (scan_cache == NULL)
 			{
@@ -7876,12 +7957,13 @@ locator_add_or_remove_index_internal(THREAD_ENTRY *thread_p, RECDES *recdes, OID
 					unique_stat_info = NULL;
 				}
 			}
+                        // mvcc 헤더 설정
 			if (use_mvcc)
 			{
 				btree_set_mvcc_header_ids_for_update(thread_p, !is_insert, is_insert, &mvccid, mvcc_rec_header);
 				p_mvcc_rec_header = mvcc_rec_header;
 			}
-
+                        // 인덱스 제약조건 설정. 인덱스 유형에따라 unique_pk 값 설정
 			unique_pk = 0;
 			if (index->type == BTREE_UNIQUE || index->type == BTREE_REVERSE_UNIQUE)
 			{
@@ -7899,7 +7981,7 @@ locator_add_or_remove_index_internal(THREAD_ENTRY *thread_p, RECDES *recdes, OID
 #endif /* ENABLE_SYSTEMTAP */
 
 				if (index->type == BTREE_FOREIGN_KEY && !skip_checking_fk)
-				{
+				{// 외래키 인덱스인 경우객체 락
 					if (lock_object(thread_p, inst_oid, class_oid, X_LOCK, LK_UNCOND_LOCK) != LK_GRANTED)
 					{
 						goto error;
@@ -7907,14 +7989,14 @@ locator_add_or_remove_index_internal(THREAD_ENTRY *thread_p, RECDES *recdes, OID
 				}
 
 				if (index->index_status == OR_ONLINE_INDEX_BUILDING_IN_PROGRESS)
-				{
+				{ // 온라인 인덱싱(?) 상태일 경우 dispatcher를 통해 인덱스 작업을 수행
 					/* Online index is currently loading. */
 					error_code =
 						btree_online_index_dispatcher(thread_p, &btid, key_dbvalue, class_oid, inst_oid, unique_pk,
 													  BTREE_OP_ONLINE_INDEX_TRAN_INSERT, NULL);
 				}
 				else
-				{
+				{ // 일반적인 경우 btree_insert를 통해 인덱스 작업을 수행
 					error_code =
 						btree_insert(thread_p, &btid, key_dbvalue, class_oid, inst_oid, op_type, unique_stat_info,
 									 &unique_pk, p_mvcc_rec_header);
@@ -8296,7 +8378,10 @@ int locator_update_index(THREAD_ENTRY *thread_p, RECDES *new_recdes, RECDES *old
 
 	aligned_newbuf = PTR_ALIGN(newbuf, MAX_ALIGNMENT);
 	aligned_oldbuf = PTR_ALIGN(oldbuf, MAX_ALIGNMENT);
-
+        // attribute 정보(필요한 컬럼정보)를 준비하는 함수 
+        // 반환값은 인덱스의 수이므로 pk 나 유니크는 제외
+        // 유사한 시점에 빈 파라미터 &space_attrinfo[0], &new_idx_info, &space_attrinfo[1], &old_idx_info 로 호출하는거면
+        // 같은 값이 예상된다. 전 후 비교를 하기위해 이렇게하는것같은데....
 	new_num_found = heap_attrinfo_start_with_index(thread_p, class_oid, NULL, &space_attrinfo[0], &new_idx_info, false);
 	num_btids = new_idx_info.num_btids;
 	if (new_num_found < 0)
@@ -8313,7 +8398,7 @@ int locator_update_index(THREAD_ENTRY *thread_p, RECDES *new_recdes, RECDES *old
 		goto error;
 	}
 	old_attrinfo = &space_attrinfo[1];
-
+        // 직후에 읽어왔으니 읽어온 값의 수가 다르면 실패
 	if (new_num_found != old_num_found)
 	{
 		if (new_num_found > 0)
@@ -8326,7 +8411,7 @@ int locator_update_index(THREAD_ENTRY *thread_p, RECDES *new_recdes, RECDES *old
 		}
 		return ER_FAILED;
 	}
-
+        // pk 나 유니크가 없으면 need_replication 은 false (pk 제약시 이부분 해결필요)
 	if (new_num_found == 0)
 	{
 		/* No need to replicate this record since there is no primary key */
@@ -8344,7 +8429,11 @@ int locator_update_index(THREAD_ENTRY *thread_p, RECDES *new_recdes, RECDES *old
 	 * Get the new and old values of key and update the index when
 	 * the keys are different
 	 */
-
+        /*
+         * 인덱스가 있으며, 인덱스 attribute 정보(attrinfo)가 초기화되었다.
+         * 인덱스된 속성들의 값이 변경된 경우 인덱스도 갱신되어야 한다.
+         * 새로운 키 값과 기존 키 값을 가져와서, 두 키가 다를 경우 인덱스를 갱신한다.
+         */
 	new_attrinfo = &space_attrinfo[0];
 	old_attrinfo = &space_attrinfo[1];
 
@@ -8359,10 +8448,11 @@ int locator_update_index(THREAD_ENTRY *thread_p, RECDES *new_recdes, RECDES *old
 		goto error;
 	}
 
-	/*
-	 *  Ensure that we have the same number of indexes and
-	 *  get the number of B-tree IDs.
-	 */
+          /*
+          *  Ensure that we have the same number of indexes and
+          *  get the number of B-tree IDs.
+          */
+         // 인덱스 개수가 동일한지 확인하고, B-트리 아이디 개수를 가져온다.
 	if (old_attrinfo->last_classrepr->n_indexes != new_attrinfo->last_classrepr->n_indexes)
 	{
 		error_code = ER_FAILED;
@@ -8380,22 +8470,26 @@ int locator_update_index(THREAD_ENTRY *thread_p, RECDES *new_recdes, RECDES *old
 	for (i = 0; i < num_btids; i++)
 	{
 		index = &(new_attrinfo->last_classrepr->indexes[i]);
+    // primary key index를 찾지 않았고 replication 상황이고, 인덱스 타입이 Pk 일때 pk btid index를 현재 인덱스(i)로 설정 -> i번째 인덱스가 pk임
 		if (pk_btid_index == -1 && repl_info != NULL && repl_info->need_replication == true && !LOG_CHECK_LOG_APPLIER(thread_p) && index->type == BTREE_PRIMARY_KEY && log_does_allow_replication() == true)
 		{
 			pk_btid_index = i;
 		}
 
 		/* check for specified update attributes */
-		if ((att_id != NULL) && ((use_mvcc == false) || (index->type == BTREE_PRIMARY_KEY && index->fk != NULL)))
+              // 업데이트 대상 컬럼을 기반으로 인덱스 갱신이 필요한지 검사
+		if ((att_id != NULL) && ((use_mvcc == false) || (index->type == BTREE_PRIMARY_KEY && index->fk != NULL))) //???????
 		{
 			found_btid = false; /* guess as not found */
 
-			for (j = 0; j < n_att_id && !found_btid; j++)
-			{
+			for (j = 0; j < n_att_id && !found_btid; j++) 
+			{// 현재 인덱스가 사용하는 모든 attribute(index->n_attrs) 순회
 				for (k = 0; k < index->n_atts && !found_btid; k++)
 				{
+                                        // update시 변경된 attrbute 리스트(att_id)와 비교
 					if (att_id[j] == (ATTR_ID)(index->atts[k]->id))
 					{ /* the index key_type has updated attr */
+                                            
 						found_btid = true;
 					}
 				}
@@ -8403,51 +8497,55 @@ int locator_update_index(THREAD_ENTRY *thread_p, RECDES *new_recdes, RECDES *old
 
 			/* in MVCC, in case of BTREE_PRIMARY_KEY having FK need to update PK index but skip foreign key restrictions
 			 * checking */
+      // mvcc환경에서는, 만약 인덱스가 pk이고 fk 이면 해당 Pk인ㄷ게스를 업데이트할 필요가 있다. (단, 이때 fk 제약조건 검사 자체는 생략 가능)
 			if (!found_btid && !index->filter_predicate && (index->type != BTREE_PRIMARY_KEY || index->fk == NULL))
 			{
 				continue; /* skip and go ahead */
 			}
 		}
-
+                
 		do_delete_only = false;
 		do_insert_only = false;
-		if (index->filter_predicate)
+		if (index->filter_predicate) // filter predicate가 설정되어 있을경우
 		{
 			inst_oids[0] = inst_oids[1] = oid;
-			recs[0] = old_recdes;
-			recs[1] = new_recdes;
+			recs[0] = old_recdes; // 업데이트 이전의 레코드
+			recs[1] = new_recdes; // 업데이트 이후 레코드
+
+                      // filter predicate 를 평가(?) 하는 함수. ev_result에 평가 결과가 담김
 			error_code =
 				locator_eval_filter_predicate(thread_p, &index->btid, index->filter_predicate, class_oid, inst_oids, 2,
 											  recs, ev_results);
+                      
 			if (error_code == ER_FAILED)
 			{
 				goto error;
 			}
 
-			if (ev_results[0] != V_TRUE)
+			if (ev_results[0] != V_TRUE) // old가 predicate를 만족하지 못하는 경우 
 			{
-				if (ev_results[1] != V_TRUE)
+				if (ev_results[1] != V_TRUE) // new도 만족하지 못하면 인덱스 작업 불필요
 				{
 					/* the old rec and the new rec does not satisfied the filter predicate */
 					continue;
 				}
-				else
+				else // new만 만족하는 경우는 insert
 				{
 					/* the old rec does not satisfied the filter predicate */
 					/* the new rec satisfied the filter predicate */
 					do_insert_only = true;
 				}
 			}
-			else
+			else // old가 predicate 만족
 			{
-				if (ev_results[1] != V_TRUE)
+				if (ev_results[1] != V_TRUE) // new 가 predicate 만족 못할 경우 delete
 				{
 					/* the old rec satisfied the filter predicate the new rec does not satisfied the filter predicate */
 					do_delete_only = true;
 				}
 				else
 				{
-					if (found_btid == false)
+					if (found_btid == false) // new 가 predicate 만족 && found_btid 가 flase 면 생략
 					{
 						/* the old rec satisfied the filter predicate the new rec satisfied the filter predicate the
 						 * index does not contain updated attributes */
@@ -8472,7 +8570,7 @@ int locator_update_index(THREAD_ENTRY *thread_p, RECDES *new_recdes, RECDES *old
 		}
 
 		dbval_type = DB_VALUE_DOMAIN_TYPE(old_key);
-		if (DB_VALUE_DOMAIN_TYPE(new_key) != dbval_type)
+		if (DB_VALUE_DOMAIN_TYPE(new_key) != dbval_type) // old_key 와 new_key 의 데이터 타입 비교
 		{
 			error_code = ER_FAILED;
 			goto error;
@@ -8482,7 +8580,7 @@ int locator_update_index(THREAD_ENTRY *thread_p, RECDES *new_recdes, RECDES *old
 		{
 			unique_stat_info = NULL;
 		}
-		else
+		else // 스캔캐시가 있고, op type 이 아래 3개중 하나일 경우 unique_stat_info 설정
 		{
 			if (op_type == MULTI_ROW_UPDATE || op_type == MULTI_ROW_INSERT || op_type == MULTI_ROW_DELETE)
 			{
@@ -8497,7 +8595,7 @@ int locator_update_index(THREAD_ENTRY *thread_p, RECDES *new_recdes, RECDES *old
 
 		new_isnull = db_value_is_null(new_key);
 		old_isnull = db_value_is_null(old_key);
-		pr_type = pr_type_from_id(dbval_type);
+		pr_type = pr_type_from_id(dbval_type); // primitive type 조회
 		if (pr_type == NULL)
 		{
 			error_code = ER_FAILED;
@@ -8505,17 +8603,19 @@ int locator_update_index(THREAD_ENTRY *thread_p, RECDES *new_recdes, RECDES *old
 		}
 
 		assert(key_domain != NULL);
-		if (pr_type->id == DB_TYPE_MIDXKEY)
+		if (pr_type->id == DB_TYPE_MIDXKEY) // 복합키
 		{
 			assert(TP_DOMAIN_TYPE(key_domain) == DB_TYPE_MIDXKEY);
 			new_key->data.midxkey.domain = old_key->data.midxkey.domain = key_domain;
 		}
-		else
+		else  // 단일키
 		{
 			assert(old_isnull || TP_ARE_COMPARABLE_KEY_TYPES(TP_DOMAIN_TYPE(key_domain), pr_type->id));
 		}
 
 		same_key = true; /* init */
+              // 키를 비교한다. 둘중 하나가 null 인데 다른 하나는 Null 아닐 경우 다른키
+              // 비트리를 비교했는데 DB_EQ가 반환되지 않으면 다른키(변경된 키)
 		if ((new_isnull && !old_isnull) || (old_isnull && !new_isnull))
 		{
 			same_key = false;
@@ -8544,19 +8644,20 @@ int locator_update_index(THREAD_ENTRY *thread_p, RECDES *new_recdes, RECDES *old
 		CUBRID_IDX_UPDATE_START(classname, index->btname);
 		is_started = true;
 #endif /* ENABLE_SYSTEMTAP */
-
+                // 키가 변경되었거나, 삭제거나, 인서트
+                // 작업 수행, mvcc여부에 따라 다른 함수로 연산 수행
 		if (!same_key || do_delete_only || do_insert_only)
 		{
-			if (i < 1 || !locator_was_index_already_applied(new_attrinfo, &index->btid, i))
+			if (i < 1 || !locator_was_index_already_applied(new_attrinfo, &index->btid, i)) // 같은 트랜잭션에서 같은 인덱스에대해 작업했는가?
 			{
-				if (mvccid != MVCCID_NULL)
+				if (mvccid != MVCCID_NULL) // mvcc 환경일 경우 record header 업데이트
 				{
 					btree_set_mvcc_header_ids_for_update(thread_p, do_delete_only, do_insert_only, &mvccid,
 														 mvcc_rec_header);
 					p_mvcc_rec_header = mvcc_rec_header;
 				}
 
-				unique_pk = 0;
+				unique_pk = 0
 				if (index->type == BTREE_UNIQUE || index->type == BTREE_REVERSE_UNIQUE)
 				{
 					unique_pk = BTREE_CONSTRAINT_UNIQUE;
@@ -8570,6 +8671,7 @@ int locator_update_index(THREAD_ENTRY *thread_p, RECDES *new_recdes, RECDES *old
 				{
 					if (index->index_status == OR_ONLINE_INDEX_BUILDING_IN_PROGRESS)
 					{
+                                          // 온라인 인덱스일경우 btree_online_index_dispatcher로 삭제
 						error_code =
 							btree_online_index_dispatcher(thread_p, &index->btid, old_key, class_oid, oid, unique_pk,
 														  BTREE_OP_ONLINE_INDEX_TRAN_DELETE, NULL);
@@ -8581,6 +8683,7 @@ int locator_update_index(THREAD_ENTRY *thread_p, RECDES *new_recdes, RECDES *old
 					}
 					else
 					{ /* Not online index. */
+                                          // 온라인 인덱스가 아니고 mvcc를 사용하는 경우 btree_mvcc_delete로 삭제
 						if (use_mvcc)
 						{
 							/* in MVCC logical deletion means MVCC DEL_ID insertion */
@@ -8593,7 +8696,7 @@ int locator_update_index(THREAD_ENTRY *thread_p, RECDES *new_recdes, RECDES *old
 								goto error;
 							}
 						}
-						else
+						else // mvcc 가아닌 경우 btree_physical_delete
 						{
 							error_code =
 								btree_physical_delete(thread_p, &old_btid, old_key, oid, class_oid, &unique_pk, op_type,
@@ -8730,14 +8833,15 @@ int locator_update_index(THREAD_ENTRY *thread_p, RECDES *new_recdes, RECDES *old
 			old_key = NULL;
 		}
 	}
-
+        // 이 인덱스에 pk가 존재하는 경우만 복제 pk_btid_index는 heap_attrinfo_start_with_index함수 이후 값이 채워짐
 	if (pk_btid_index != -1)
 	{
 		assert(repl_info != NULL);
 
-		if (repl_old_key == NULL)
+		if (repl_old_key == NULL) // repl_old_key가 아직 없는 경우
 		{
 			key_domain = NULL;
+                      // pk 기반으로 old_key 생성(old_attrinfo와 old_recdes를 기반으로)
 			repl_old_key =
 				heap_attrvalue_get_key(thread_p, pk_btid_index, old_attrinfo, old_recdes, &old_btid, &old_dbvalue,
 									   aligned_oldbuf, NULL, &key_domain, oid, false);
@@ -8748,7 +8852,7 @@ int locator_update_index(THREAD_ENTRY *thread_p, RECDES *new_recdes, RECDES *old
 			}
 
 			old_isnull = db_value_is_null(repl_old_key);
-			pr_type = pr_type_from_id(DB_VALUE_DOMAIN_TYPE(repl_old_key));
+			pr_type = pr_type_from_id(DB_VALUE_DOMAIN_TYPE(repl_old_key)); // pr 타입 조회
 			if (pr_type == NULL)
 			{
 				error_code = ER_FAILED;
@@ -8764,7 +8868,7 @@ int locator_update_index(THREAD_ENTRY *thread_p, RECDES *new_recdes, RECDES *old
 				 */
 				repl_old_key->data.midxkey.domain = key_domain;
 			}
-
+                        // 인서트 로그 수행
 			error_code =
 				repl_log_insert(thread_p, class_oid, oid, LOG_REPLICATION_DATA, RVREPL_DATA_UPDATE, repl_old_key,
 								(REPL_INFO_TYPE)repl_info->repl_info_type);
@@ -8774,7 +8878,7 @@ int locator_update_index(THREAD_ENTRY *thread_p, RECDES *new_recdes, RECDES *old
 			}
 		}
 		else
-		{
+		{ // 인서트 로그 수행
 			error_code =
 				repl_log_insert(thread_p, class_oid, oid, LOG_REPLICATION_DATA, RVREPL_DATA_UPDATE, repl_old_key,
 								(REPL_INFO_TYPE)repl_info->repl_info_type);
@@ -12875,6 +12979,7 @@ int xlocator_redistribute_partition_data(THREAD_ENTRY *thread_p, OID *class_oid,
  *
  * NOTE: Caller must handle the cleanup of context
  */
+// oid에 해당하는 object를 heap에서 찾고, mvcc snapshot을 기준으로 visible 확인 및 lock
 static SCAN_CODE
 locator_lock_and_get_object_internal(THREAD_ENTRY *thread_p, HEAP_GET_CONTEXT *context, LOCK lock_mode)
 {
@@ -12888,9 +12993,11 @@ locator_lock_and_get_object_internal(THREAD_ENTRY *thread_p, HEAP_GET_CONTEXT *c
 	assert(context->scan_cache != NULL);
 
 	/* try to lock the object conditionally, if it fails unfix page watchers and try unconditionally */
-
+        // lock 시도
 	if (lock_object(thread_p, context->oid_p, context->class_oid_p, lock_mode, LK_COND_LOCK) != LK_GRANTED)
 	{
+            // 실패시 context를 cleanup하고, page를 unfixed, unconditinal lock 재시도
+            // 이것마저 실패하면 error 반환
 		if (context->scan_cache && context->scan_cache->cache_last_fix_page && context->home_page_watcher.pgptr != NULL)
 		{
 			/* prevent caching home page watcher in scan_cache */
@@ -12905,6 +13012,7 @@ locator_lock_and_get_object_internal(THREAD_ENTRY *thread_p, HEAP_GET_CONTEXT *c
 		lock_acquired = true;
 
 		/* Prepare for getting record again. Since pages have been unlatched, others may have changed them */
+                // 레코드를 다시 가져올 준비를 한다. 페이지가 unlatch된 이후 다른 트랜잭션이 변경했을 수 있기때문.
 		scan = heap_prepare_get_context(thread_p, context, false, LOG_WARNING_IF_DELETED);
 		if (scan != S_SUCCESS)
 		{
@@ -12921,6 +13029,7 @@ locator_lock_and_get_object_internal(THREAD_ENTRY *thread_p, HEAP_GET_CONTEXT *c
 	/* Lock should be aquired now -> get recdes */
 	if (context->recdes_p != NULL)
 	{
+                // 최신 object 버전을 record descriptor recdes_p에 저장
 		scan = heap_get_last_version(thread_p, context);
 		/* this scan_code must be preserved until the end of this function to be returned; - unless an error occur */
 		if (scan != S_SUCCESS && scan != S_SUCCESS_CHN_UPTODATE)
@@ -12928,13 +13037,14 @@ locator_lock_and_get_object_internal(THREAD_ENTRY *thread_p, HEAP_GET_CONTEXT *c
 			goto error;
 		}
 	}
-
+        // mvcc가 적용된 클래스인지 확인하고, isolation restriction과 visibility를 확인한다.
 	/* Check isolation restrictions and the visibility of the object if it belongs to a mvcc class */
 	if (!mvcc_is_mvcc_disabled_class(context->class_oid_p))
 	{
 		MVCC_REC_HEADER recdes_header;
 
 		/* get header: directly from recdes if it has been obtained, otherwise from heap */
+                // 레코드가 없는 경우 새로운 페이지에 접근해 header
 		if (context->recdes_p == NULL || scan == S_SUCCESS_CHN_UPTODATE)
 		{
 			/* ensure context is prepared to get header of the record */
@@ -12949,6 +13059,7 @@ locator_lock_and_get_object_internal(THREAD_ENTRY *thread_p, HEAP_GET_CONTEXT *c
 				goto error;
 			}
 		}
+                // record가 있을 경우 이미 읽은 record에서 mvcc header를 추출
 		else if (or_mvcc_get_header(context->recdes_p, &recdes_header) != NO_ERROR)
 		{
 			goto error;
@@ -12968,7 +13079,7 @@ locator_lock_and_get_object_internal(THREAD_ENTRY *thread_p, HEAP_GET_CONTEXT *c
 
 			assert(tran_snapshot != NULL && tran_snapshot->snapshot_fnc != NULL);
 			snapshot_res = tran_snapshot->snapshot_fnc(thread_p, &recdes_header, tran_snapshot);
-			if (snapshot_res == TOO_OLD_FOR_SNAPSHOT)
+			if (snapshot_res == TOO_OLD_FOR_SNAPSHOT) // 이미 사라진 버전
 			{
 				/* Not visible. */
 				er_set(ER_WARNING_SEVERITY, ARG_FILE_LINE, ER_HEAP_UNKNOWN_OBJECT, 3, context->oid_p->volid,
@@ -12976,14 +13087,14 @@ locator_lock_and_get_object_internal(THREAD_ENTRY *thread_p, HEAP_GET_CONTEXT *c
 				scan = S_DOESNT_EXIST;
 				goto error;
 			}
-			else if (snapshot_res == TOO_NEW_FOR_SNAPSHOT)
+			else if (snapshot_res == TOO_NEW_FOR_SNAPSHOT) // 다른 active 트랜잭션에서 이미 변경중
 			{
 				/* Trying to modify a version already modified by concurrent transaction, which is an isolation conflict.
 				 */
 				er_set(ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_MVCC_SERIALIZABLE_CONFLICT, 0);
 				goto error;
 			}
-			else if (MVCC_IS_HEADER_DELID_VALID(&recdes_header))
+			else if (MVCC_IS_HEADER_DELID_VALID(&recdes_header)) // 삭제된 버전(사라진 버전과의 차이는???)
 			{
 				/* Trying to modify version deleted by concurrent transaction, which is an isolation conflict. */
 				er_set(ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_MVCC_SERIALIZABLE_CONFLICT, 0);
@@ -13295,16 +13406,17 @@ locator_lock_and_get_object(THREAD_ENTRY *thread_p, const OID *oid, OID *class_o
 {
 	HEAP_GET_CONTEXT context;
 	SCAN_CODE scan_code;
-
+      
 	if (scan_cache && ispeeking == COPY && recdes != NULL)
 	{
+                // 복사 모드일 경우 recdes에 충분한 버퍼공간이 되어야기때문에 2배 크기의 페이지 할당
 		/* Allocate an area to hold the object. Assume that the object will fit in two pages for not better estimates. */
 		if (heap_scan_cache_allocate_area(thread_p, scan_cache, DB_PAGESIZE * 2) != NO_ERROR)
 		{
 			return S_ERROR;
 		}
 	}
-
+        // context를 이용해 모든 heap 접근을 해야하므로 관련 정보를 초기화
 	heap_init_get_context(thread_p, &context, oid, class_oid, recdes, scan_cache, ispeeking, old_chn);
 	scan_code = locator_lock_and_get_object_internal(thread_p, &context, lock);
 	heap_clean_get_context(thread_p, &context);

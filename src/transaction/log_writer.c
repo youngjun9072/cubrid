@@ -643,6 +643,7 @@ logwr_set_hdr_and_flush_info (void)
   int num_toflush = 0;
 
   /* Set the flush information */
+  // 서버로부터 받은 로그페이지의 ptr을 순회하며 toflush에 저장한다.
   p = logwr_Gl.logpg_area + LOG_PAGESIZE;
   while (p < (logwr_Gl.logpg_area + logwr_Gl.logpg_fill_size))
     {
@@ -660,11 +661,14 @@ logwr_set_hdr_and_flush_info (void)
   /* Set the header and action information */
   if (num_toflush > 0)
     {
+      // 첫번째 페이지의 area는 LOG_HEADER를 포함하고 있다.
+      // 이 구조체를 logwr_Gl.hdr에 복사한다.
       log_pgptr = (LOG_PAGE *) logwr_Gl.logpg_area;
       memcpy (&logwr_Gl.hdr, log_pgptr->area, sizeof (LOG_HEADER));
       logwr_Gl.loghdr_pgptr = log_pgptr;
 
       /* Initialize archive info if it is not set */
+      //처음 아카이빙을 시작할 때 시작위치(fpageid)와 번호(arv_num)를 설정한다.
       if (logwr_Gl.last_arv_fpageid == NULL_PAGEID || logwr_Gl.last_arv_num < 0)
 	{
 	  logwr_Gl.last_arv_fpageid = logwr_Gl.hdr.nxarv_pageid;
@@ -676,23 +680,24 @@ logwr_set_hdr_and_flush_info (void)
 	}
 
       /* Check if it need archiving */
+      // 아카이빙 필요 여부를 판단
       if (((logwr_Gl.last_arv_num + 1 < logwr_Gl.hdr.nxarv_num)
 	   && (logwr_Gl.hdr.ha_file_status == LOG_HA_FILESTAT_ARCHIVED))
 	  && (logwr_Gl.last_arv_fpageid <= logwr_Gl.last_recv_pageid))
-	{
+	{// 서버에서 nxarv_num 이 증가했고, HA상태가 archived인 경우 -> 아카이빙 지연되었으므로 즉시 아카이빙
 	  /* Do delayed archiving */
 	  logwr_Gl.action = (LOGWR_ACTION) (logwr_Gl.action | LOGWR_ACTION_ARCHIVING);
 	  logwr_Gl.last_arv_lpageid = logwr_Gl.last_recv_pageid;
 	}
       else if ((logwr_Gl.last_arv_num + 1 == logwr_Gl.hdr.nxarv_num)
 	       && (last_pgptr->hdr.logical_pageid >= logwr_Gl.hdr.nxarv_pageid))
-	{
+	{ // 아카이빙 경계에 도달했을 경우
 	  logwr_Gl.action = (LOGWR_ACTION) (logwr_Gl.action | LOGWR_ACTION_ARCHIVING);
 	  logwr_Gl.last_arv_lpageid = logwr_Gl.hdr.nxarv_pageid - 1;
 	}
 
       if (last_pgptr != NULL && last_pgptr->hdr.logical_pageid < logwr_Gl.hdr.eof_lsa.pageid)
-	{
+	{// EOF보다 마지막 페이지 ID가 적으면 아직 수신이 덜 끝났으니 delay된 쓰기를 설정한다.
 	  /* There are left several pages to get from the server */
 	  logwr_Gl.last_recv_pageid = last_pgptr->hdr.logical_pageid;
 	  logwr_Gl.action = (LOGWR_ACTION) (logwr_Gl.action | LOGWR_ACTION_DELAYED_WRITE);
@@ -866,7 +871,7 @@ logwr_writev_append_pages (LOG_PAGE ** to_flush, DKNPAGES npages)
       (void) logwr_check_page_checksum (NULL, *to_flush);
 
       /* 1. archive temp write */
-      if (prm_get_bool_value (PRM_ID_LOG_BACKGROUND_ARCHIVING))
+      if (prm_get_bool_value (PRM_ID_LOG_BACKGROUND_ARCHIVING)) // 백그라운드 아카이브 로그
 	{
 	  bg_arv_info = &logwr_Gl.bg_archive_info;
 	  /* check archive temp descriptor */
@@ -938,10 +943,10 @@ logwr_writev_append_pages (LOG_PAGE ** to_flush, DKNPAGES npages)
 		}
 	    }
 
-	  bg_arv_info->current_page_id = fpageid + (npages - 1);
+	  bg_arv_info->current_page_id = fpageid + (npages - 1); // 완료 후 current_page_id 갱신
 	  logwr_er_log ("background archiving  current_page_id[%lld], fpageid[%lld], npages[%d]",
 			bg_arv_info->current_page_id, fpageid, npages);
-
+          // 헤더 페이지 플러시
 	  error = logwr_flush_bgarv_header_page ();
 	  if (error != NO_ERROR)
 	    {
@@ -1041,7 +1046,7 @@ logwr_flush_all_append_pages (void)
 	  pageid = pgptr->hdr.logical_pageid;
 	  prv_pageid = prv_pgptr->hdr.logical_pageid;
 
-	  if ((pageid != prv_pageid + 1)
+	  if ((pageid != prv_pageid + 1) // 연속된 페이지인지 확인
 	      || (logwr_to_physical_pageid (pageid) != logwr_to_physical_pageid (prv_pageid) + 1))
 	    {
 	      /*
@@ -1049,6 +1054,7 @@ logwr_flush_all_append_pages (void)
 	       *
 	       * Flush the accumulated contiguous pages
 	       */
+        // 연속되지 않으면 이전까지 모은 연속된 묶음을 logwr_writev_append_pages()로 플러시
 	      if (logwr_writev_append_pages (&logwr_Gl.toflush[idxflush], i - idxflush) == NULL)
 		{
 		  assert (er_errid () != NO_ERROR);
@@ -1273,6 +1279,7 @@ logwr_flush_header_page (void)
  * return:
  * Note:
  */
+// active log 를 archive 로그로 복사하는 기능
 static int
 logwr_archive_active_log (void)
 {
@@ -1295,7 +1302,9 @@ logwr_archive_active_log (void)
   aligned_log_pgbuf = PTR_ALIGN (log_pgbuf, MAX_ALIGNMENT);
 
   /* Create the archive header page */
-  malloc_arv_hdr_pgptr = (LOG_PAGE *) malloc (LOG_PAGESIZE);
+  // 아카이브 로그의 첫번째 페이지는 헤더 페이지. 
+
+  malloc_arv_hdr_pgptr = (LOG_PAGE *) malloc (LOG_PAGESIZE); 
   if (malloc_arv_hdr_pgptr == NULL)
     {
       error_code = ER_OUT_OF_VIRTUAL_MEMORY;
@@ -1307,6 +1316,7 @@ logwr_archive_active_log (void)
   malloc_arv_hdr_pgptr->hdr.offset = NULL_OFFSET;
 
   /* Construct the archive log header */
+  // 생성 시간 등 메타데이터 기록
   arvhdr = (LOG_ARV_HEADER *) malloc_arv_hdr_pgptr->area;
   strncpy (arvhdr->magic, CUBRID_MAGIC_LOG_ARCHIVE, CUBRID_MAGIC_MAX_LENGTH);
   arvhdr->db_creation = logwr_Gl.hdr.db_creation;
@@ -1323,9 +1333,11 @@ logwr_archive_active_log (void)
   snprintf (buffer, sizeof (buffer), "log archiving started for archive %03d", arvhdr->arv_num);
   er_set (ER_NOTIFICATION_SEVERITY, ARG_FILE_LINE, ER_HA_GENERIC_ERROR, 1, buffer);
 
+    // 파일 생성 또는 마운트
+    // 아카이브 로그 파일을 생성하거나, 이미 존재하면 마운트.
   fileio_make_log_archive_name (archive_name, logwr_Gl.log_path, logwr_Gl.db_name, arvhdr->arv_num);
   bg_arv_info = &logwr_Gl.bg_archive_info;
-  if (prm_get_bool_value (PRM_ID_LOG_BACKGROUND_ARCHIVING))
+  if (prm_get_bool_value (PRM_ID_LOG_BACKGROUND_ARCHIVING))// 이 파라미터가 켜져있으면 임시 파일을 사용
     {
       if (bg_arv_info->vdes == NULL_VOLDES)
 	{
@@ -1362,7 +1374,7 @@ logwr_archive_active_log (void)
 	    }
 	}
     }
-
+    // 아카이브 헤더를 파일의 첫페이지에 기록
   if (fileio_write (NULL, vdes, malloc_arv_hdr_pgptr, 0, LOG_PAGESIZE, FILEIO_WRITE_NO_COMPENSATE_WRITE) == NULL)
     {
       /* Error archiving header page into archive */
@@ -1386,6 +1398,7 @@ logwr_archive_active_log (void)
   log_pgptr = (LOG_PAGE *) aligned_log_pgbuf;
 
   /* Now start dumping the current active pages to archive */
+  // last_arv_fpageid 부터 last_arv_lpageid 까지의 페이지를 아카이브 로그로 복사
   for (; pageid <= logwr_Gl.last_arv_lpageid; pageid += num_pages, ar_phy_pageid += num_pages)
     {
       /*
@@ -1428,6 +1441,8 @@ logwr_archive_active_log (void)
   vdes = NULL_VOLDES;
 
   if (prm_get_bool_value (PRM_ID_LOG_BACKGROUND_ARCHIVING) && bg_arv_info->vdes != NULL_VOLDES)
+  // 백그라운드 아카이브 처리
+  // 임시 로그를 실제 아카이브 파일 명으로 변경
     {
       bg_arv_info->vdes = NULL_VOLDES;
       if (fileio_rename (NULL_VOLID, logwr_Gl.bg_archive_name, archive_name) == NULL)
@@ -1455,11 +1470,14 @@ logwr_archive_active_log (void)
     }
 
   /* Update archive info */
+  // 다음 아카이브를 위한 정보 갱신
   logwr_Gl.last_arv_num++;
   logwr_Gl.last_arv_fpageid = logwr_Gl.last_arv_lpageid + 1;
 
   /* set append lsa as last archive logical pageid */
   /* in order to prevent log applier reading an immature active log page. */
+  // append lsa를 마지막 아카이브 논리 페이지 id로 설정
+  // log applier가 아직 완성되지 않은 active log 페이지를 읽지 못하도록 하기 위함
   LSA_COPY (&saved_append_lsa, &logwr_Gl.hdr.append_lsa);
   logwr_Gl.hdr.append_lsa.pageid = logwr_Gl.last_arv_lpageid;
   logwr_Gl.hdr.append_lsa.offset = NULL_OFFSET;
@@ -1517,7 +1535,7 @@ logwr_write_log_pages (void)
   struct timeval curtime;
   int diff_msec;
 
-  if (logwr_Gl.num_toflush <= 0)
+  if (logwr_Gl.num_toflush <= 0) // 플러시 할 데이터가 없는 경우
     return NO_ERROR;
 
   if (logwr_Gl.mode == LOGWR_MODE_SEMISYNC)
@@ -1537,6 +1555,7 @@ logwr_write_log_pages (void)
     }
 
   if (logwr_Gl.append_vdes == NULL_VOLDES && !fileio_is_volume_exist (logwr_Gl.active_name))
+  // 디스크에 엑티브로그 파일이 없으면 새로 생성
     {
       /* Create a new active log */
       logwr_Gl.append_vdes =
@@ -1554,7 +1573,9 @@ logwr_write_log_pages (void)
    * after archiving finished, so that logwr_archive_active_log() should
    * be executed before logwr_flush_all_append_pages().
    */
+  // 새로운 엑티브 로그를 받은 후 아카이브가 필요하다면 기존 active log를 아카이브로 이동
   if (logwr_Gl.action & LOGWR_ACTION_ARCHIVING)
+  // 
     {
       error = logwr_archive_active_log ();
       if (error != NO_ERROR)
@@ -1562,7 +1583,7 @@ logwr_write_log_pages (void)
 	  return error;
 	}
     }
-
+    // toflush 배열의 몯든 로그 페이지를 디스크에 기록
   error = logwr_flush_all_append_pages ();
   if (error != NO_ERROR)
     {
@@ -2285,7 +2306,7 @@ logwr_pack_log_pages (THREAD_ENTRY * thread_p, char *logpg_area, int *logpg_used
   lpageid = NULL_PAGEID;
   ha_file_status = LOG_HA_FILESTAT_CLEAR;
 
-  is_hdr_page_only = (entry->fpageid == LOGPB_HEADER_PAGE_ID);
+  is_hdr_page_only = (entry->fpageid == LOGPB_HEADER_PAGE_ID); // 헤더만 요청인가?
 
   if (is_hdr_page_only == true && entry->copy_from_first_phy_page == true)
     {
@@ -2296,15 +2317,16 @@ logwr_pack_log_pages (THREAD_ENTRY * thread_p, char *logpg_area, int *logpg_used
 
   if (LSA_ISNULL (&entry->eof_lsa))
     {
-      LSA_COPY (&eof_lsa, &log_Gl.hdr.eof_lsa);
+      LSA_COPY (&eof_lsa, &log_Gl.hdr.eof_lsa); // eof_lsa가 NULL이면 log_Gl.hdr.eof_lsa를 사용
     }
   else
     {
-      LSA_COPY (&eof_lsa, &entry->eof_lsa);
+      LSA_COPY (&eof_lsa, &entry->eof_lsa); 
     }
 
-  if (entry->copy_from_first_phy_page == true)
+  if (entry->copy_from_first_phy_page == true) 
     {
+      // 외부에서 요청한 시작 로그 페이지 id를 가져오고
       fpageid = entry->fpageid;
       if (fpageid == NULL_PAGEID)
 	{
@@ -2315,9 +2337,9 @@ logwr_pack_log_pages (THREAD_ENTRY * thread_p, char *logpg_area, int *logpg_used
 	      goto error;
 	    }
 	}
-
+        // arhive 혹은 active에 있는 지 확인
       if (logpb_is_page_in_archive (fpageid) == true)
-	{
+	{// 아카이브에 있다면 해당 archive header 추출, arvhdr에는 arhicve로그의 시작 페이지와 총 페이지 수가 있음
 	  if (logpb_fetch_from_archive (thread_p, fpageid, NULL, NULL, &arvhdr, false) == NULL)
 	    {
 	      error_code = ER_FAILED;
@@ -2325,11 +2347,13 @@ logwr_pack_log_pages (THREAD_ENTRY * thread_p, char *logpg_area, int *logpg_used
 	    }
 
 	  nxarv_phy_pageid = 1;	/* first physical page id */
-	  nxarv_pageid = arvhdr.fpageid;
+    // 아카이브 정보 설정
+	  nxarv_pageid = arvhdr.fpageid; 
 	  nxarv_num = arvhdr.arv_num;
 	}
       else
-	{
+	{// 아카이브에 없는 경우, 즉 active 로그에 있는 경우
+          // 현재 Log헤더에서 다음 아카이브 예정 정보를 가져옴
 	  nxarv_phy_pageid = log_Gl.hdr.nxarv_phy_pageid;
 	  nxarv_pageid = log_Gl.hdr.nxarv_pageid;
 	  nxarv_num = log_Gl.hdr.nxarv_num;
@@ -2341,14 +2365,19 @@ logwr_pack_log_pages (THREAD_ENTRY * thread_p, char *logpg_area, int *logpg_used
   else if (!is_hdr_page_only)
     {
       /* Find the first pageid to be packed */
+      // fpageid 는 요청한 로그 페이지 id
+      // lpageid 는 마지막 페이지 id
       fpageid = entry->fpageid;
       if (fpageid == NULL_PAGEID)
 	{
 	  /* In case of first request from the log writer, pack all active pages to be flushed until now */
+    // 최초 요청(요청에 명시된 pageid가 없는 경우) log_Gl.hdr.nxarv_pageid를 사용. 이 값은 다음 아카이브가 시작될 페이지 id, 즉 현재까지 아카이브되지 않은 active 로그의 시작점
 	  fpageid = log_Gl.hdr.nxarv_pageid;
 	}
       else
 	{
+    // 이미 특정 pageid가 요청되었고, 그것이 현재 i/o가능 페이지(nxio_lsa_pageid)보다 크다면
+    // 아직 버퍼에 flush 되지 않은 아이디 일 수 있으므로 nxio_lsa_pageid를 그대로 사용
 	  nxio_lsa = log_Gl.append.get_nxio_lsa ();
 	  if (fpageid > nxio_lsa.pageid)
 	    {
@@ -2359,17 +2388,21 @@ logwr_pack_log_pages (THREAD_ENTRY * thread_p, char *logpg_area, int *logpg_used
       /* Find the last pageid which is bounded by several limitations */
       if (!logpb_is_page_in_archive (fpageid))
 	{
+    // 시작 페이지가 archive에 없다면, 즉 active 로그에 있다면, 마지막 페이지는 현재 쓰여진 마지막 페이지(active 로그의 마지막 페이지)로 설정
 	  lpageid = eof_lsa.pageid;
 	}
       else
-	{
+	{ // 시작 페이지가 아카이브에 있는 경우
+          // 해당 파일의 헤더를 읽어와
+          // fpageid 부터 해당 아카이브 파일의 마지막 페이지까지를 lpageid로 설정
+          // ha_file_status 를 아카이브로
 	  LOG_ARV_HEADER arvhdr;
 
 	  /* If the fpageid is in archive log, fetch the page and the header page in the archive */
 	  if (logpb_fetch_from_archive (thread_p, fpageid, NULL, NULL, &arvhdr, false) == NULL)
 	    {
 	      error_code = ER_FAILED;
-	      goto error;
+	      goto error; 
 	    }
 	  /* Reset the lpageid with the last pageid in the archive */
 	  lpageid = arvhdr.fpageid + arvhdr.npages - 1;
