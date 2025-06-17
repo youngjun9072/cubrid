@@ -4318,6 +4318,7 @@ la_get_log_data(LOG_RECORD_HEADER *lrec, LOG_LSA *lsa, LOG_PAGE *pgptr, unsigned
  *   return: NO_ERROR or error code
  *
  */
+// log_record는 target log 레코드, recdes는 타겟에 반영할 데이터 
 static int
 la_get_overflow_recdes(LOG_RECORD_HEADER *log_record, void *logs, RECDES *recdes, unsigned int rcvindex)
 {
@@ -4336,7 +4337,7 @@ la_get_overflow_recdes(LOG_RECORD_HEADER *log_record, void *logs, RECDES *recdes
   int error = NO_ERROR;
   int length = 0;
 
-  LSA_COPY(&current_lsa, &log_record->prev_tranlsa); // 현재 레코드의 이전 트랜잭션 로그 주소로 이동해 연결된 오버플로우 로그를 추적
+  LSA_COPY(&current_lsa, &log_record->prev_tranlsa); // 타겟 레코드의 이전 트랜잭션 로그 주소로 이동해 연결된 오버플로우 로그를 추적
   prev_vpid.pageid = ((LOG_REC_UNDOREDO *)logs)->data.pageid;
   prev_vpid.volid = ((LOG_REC_UNDOREDO *)logs)->data.volid;
 
@@ -4467,6 +4468,7 @@ la_get_overflow_recdes(LOG_RECORD_HEADER *log_record, void *logs, RECDES *recdes
  *      When the applier meets the REC_ASSIGN_ADDRESS or REC_RELOCATION
  *      record, it should fetch the real UPDATE log record to be processed.
  */
+// REC_ASSIGN_ADDRESS 또는 REC_RELOCATION 레코드를 만났을 때, 실제 UPDATE 로그 레코드를 가져와서 처리한다
 static int
 la_get_next_update_log(LOG_RECORD_HEADER *prev_lrec, LOG_PAGE *pgptr, void **logs, char **rec_type, char **data,
                        int *d_length)
@@ -4495,18 +4497,22 @@ la_get_next_update_log(LOG_RECORD_HEADER *prev_lrec, LOG_PAGE *pgptr, void **log
   bool is_diff = false;
 
   pg = pgptr;
-  LSA_COPY(&lsa, &prev_lrec->forw_lsa);
+  LSA_COPY(&lsa, &prev_lrec->forw_lsa); // 현재 로그의 다음 로그를 가리키고 있음. ASSIGN_ADDRESS 로그에서 실제 update 로그를 찾기위한 시작점
   prev_log = *(LOG_REC_UNDOREDO **)logs;
 
   redo_unzip_data = la_Info.redo_unzip_ptr;
 
   while (true)
   {
+    // forw_lsa 가 가리키는 forward log 들을 따라간다.
+    // 아래쪽에 LSA_COPY(&lsa, &lrec->forw_lsa); 있음
     while (pg && pg->hdr.logical_pageid == lsa.pageid)
     {
       lrec = LOG_GET_LOG_RECORD_HEADER(pg, &lsa);
+      // 현재 lsa가 가리키는 페이지 내에서 로그 레코드를 반복해 탐색
       if (lrec->trid == prev_lrec->trid && LOG_IS_UNDOREDO_RECORD_TYPE(lrec->type))
       {
+        // todo: LOG_IS_DIFF_UNDOREDO_TYPE의 반환 결과를 그대로 is_diff에 할당해도됨
         if (LOG_IS_DIFF_UNDOREDO_TYPE(lrec->type) == true)
         {
           is_diff = true;
@@ -4527,7 +4533,7 @@ la_get_next_update_log(LOG_RECORD_HEADER *prev_lrec, LOG_PAGE *pgptr, void **log
           log_size = DB_SIZEOF(LOG_REC_UNDOREDO);
         }
 
-        offset = DB_SIZEOF(LOG_RECORD_HEADER) + lsa.offset;
+        offset = DB_SIZEOF(LOG_RECORD_HEADER) + lsa.offset; // 실제 undoredo 구조체에 접근
         pageid = lsa.pageid;
         LA_LOG_READ_ALIGN(error, offset, pageid, pg);
         LA_LOG_READ_ADVANCE_WHEN_DOESNT_FIT(error, log_size, offset, pageid, pg);
@@ -4546,7 +4552,9 @@ la_get_next_update_log(LOG_RECORD_HEADER *prev_lrec, LOG_PAGE *pgptr, void **log
           undo_length = undoredo->ulength;
           temp_length = undoredo->rlength;
           length = GET_ZIP_LEN(undoredo->rlength);
-
+          // 실제 update로그를 찾았는지 판단
+          // 페이지, 오프셋, 볼륨 아이디가 이전 로그와 동일해야함
+          // todo : 조건식 리팩토링 가능할듯
           if ((undoredo->data.rcvindex == RVHF_UPDATE || undoredo->data.rcvindex == RVHF_UPDATE_NOTIFY_VACUUM) && undoredo->data.pageid == prev_log->data.pageid && undoredo->data.offset == prev_log->data.offset && undoredo->data.volid == prev_log->data.volid)
           {
             LA_LOG_READ_ADD_ALIGN(error, log_size, offset, pageid, pg);
@@ -4619,6 +4627,7 @@ la_get_next_update_log(LOG_RECORD_HEADER *prev_lrec, LOG_PAGE *pgptr, void **log
     }
 
     pg = la_get_page(lsa.pageid);
+    // 여러 페이지에 나눠져 있을 수 있으므로 필요시 다음 페이지로 이동
   }
 
   return error;
@@ -4688,7 +4697,8 @@ la_get_recdes(LOG_LSA *lsa, LOG_PAGE *pgptr, RECDES *recdes, unsigned int *rcvin
   // 이 시점에서 pgptr은 데이터를 포함한 실제 페이지의 주소값이고,
   // pg 의 데이터 영역 + offset 으로 가져오려는 로그의 해더 주소로 접근한다.
   pg = pgptr;
-  lrec = LOG_GET_LOG_RECORD_HEADER(pg, lsa);
+  lrec = LOG_GET_LOG_RECORD_HEADER(pg, lsa); // lsa는 타겟의 lsa이고 페이지로부터 타겟 레콛의 디스크립터를 가져옴
+  // recdes는 타겟에 반영할 데이터
   // 로그 내용 조회 및 파싱
   // 추출 내용: recdes->data, recdes->length, rcvindex, logs, rec_type
   error = la_get_log_data(lrec, lsa, pg, 0, rcvindex, &logs, &rec_type, &recdes->data, &recdes->length);
