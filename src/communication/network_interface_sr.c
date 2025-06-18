@@ -7505,6 +7505,9 @@ int xlog_send_log_pages_to_client(THREAD_ENTRY *thread_p, char *logpg_area, int 
  * return:
  * NOTE:
  */
+// 클라이언트로부터 다음 로그 전송을 요청받아 처리하는 루틴.
+// fpageid_ptr 클라이언트가 요청한 첫 페이지 반환
+//
 int xlog_get_page_request_with_reply(THREAD_ENTRY *thread_p, LOG_PAGEID *fpageid_ptr, LOGWR_MODE *mode_ptr, int timeout)
 {
   char *reply = NULL;
@@ -7514,8 +7517,9 @@ int xlog_get_page_request_with_reply(THREAD_ENTRY *thread_p, LOG_PAGEID *fpageid
   char *ptr;
   int error;
   int remote_error;
-
+  
   /* Obtain success message from the client, without blocking the server. */
+  // 클라이언트로부터 응답을 timeout 내에 받는다.
   error = xs_receive_data_from_client_with_timeout(thread_p, &reply, &reply_size, timeout);
   if (error != NO_ERROR)
   {
@@ -7528,7 +7532,7 @@ int xlog_get_page_request_with_reply(THREAD_ENTRY *thread_p, LOG_PAGEID *fpageid
   }
 
   assert(reply != NULL);
-  ptr = or_unpack_int64(reply, &first_pageid);
+  ptr = or_unpack_int64(reply, &first_pageid); // 첫 페이지 아이디
   ptr = or_unpack_int(ptr, &mode);
   ptr = or_unpack_int(ptr, &remote_error);
   free_and_init(reply);

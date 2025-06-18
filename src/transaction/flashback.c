@@ -984,7 +984,11 @@ flashback_make_loginfo (THREAD_ENTRY * thread_p, FLASHBACK_LOGINFO_CONTEXT * con
 		   * undo record with REC_ASSIGN_ADDRESS type has no undo image to extract, so this will be treated as INSERT
 		   * CUBRID engine used to do INSERT a record like this way,
 		   * for instance CREATE a class or INSERT a record by trigger execution */
-
+                  // 다음과 같은 로그들이 연속으로 추가될 때 발생
+                  // 먼저 oid를 예약하기위한 insert 로그가 추가되고, 그 후 해당 레코드에 대한 update 로그가 이어짐
+                  // 이는 oid를 예약한 뒤 레코드를 삽입하는 Insert 작업의 일련 과정
+                  // REC_ASSIGN_ADDRESS 타입의 undo 레코드는 추출할 undo 이미지가 없으므로 INSERT로 처리됨
+                  
 		  assert (rec_type == LOG_SUPPLEMENT_TRIGGER_UPDATE);
 
 		  error =

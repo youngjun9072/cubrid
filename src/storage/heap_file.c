@@ -5967,6 +5967,12 @@ int heap_rv_mark_deleted_on_postpone(THREAD_ENTRY *thread_p, LOG_RCV *rcv)
  *              4. If length is > 0 and smaller than OID_SIZE
  *                 OID_SIZE is used as the expected length.
  */
+// 객체에 oid를 할당하고 해당 객체의 예상 크기만큼 공간을 예약한다
+// expected_length 값에 따라 다음 규칙을 따른다.
+// 1. 예상 크기가 음수인 경우, 객체의 최소 크기로 간주한다.
+// 2. 0인 경우 , 힙에 있는 객체의 평균 크기를 사용한다.
+// 3. 예상 크기가 OID_SIZE보다 크고 오버플로우에 저장될 수 있는 최대 크기보다 작으면 OID_SIZE를 사용한다.
+// 4. 예상 크기가 OID_SIZE보다 작으면 OID_SIZE를 사용한다.
 int heap_assign_address(THREAD_ENTRY *thread_p, const HFID *hfid, OID *class_oid, OID *oid, int expected_length)
 {
   HEAP_OPERATION_CONTEXT insert_context;

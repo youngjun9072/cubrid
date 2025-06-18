@@ -9360,30 +9360,39 @@ logwr_get_log_pages (LOGWR_CONTEXT * ctx_ptr)
 
   assert (logwr_Gl.last_recv_pageid <= logwr_Gl.hdr.eof_lsa.pageid);
   if (logwr_Gl.last_recv_pageid == logwr_Gl.hdr.eof_lsa.pageid)
+  // 마지막으로 받은 로그 페이지가 마스터의 EOF 페이지와 동일하다면
+  // 더이상 받을 수 있는 로그가 없음
+  // 하지만 클라이언트가 sync모드일 경우 다음 페이지가 생성될때까지 기다려야함
     {
       /* In case of synchronous request */
       first_pageid_torecv = logwr_Gl.last_recv_pageid;
-
+      // 다음 요청할 페이지는 지금까지 받은 페이지의 마지막 페이지로 설정
       mode = (logwr_Gl.last_recv_pageid == NULL_PAGEID) ? LOGWR_MODE_ASYNC : logwr_Gl.mode;
+      // last_recv_pageid가 NULL_PAGEID라면 비동기모드, 그렇지 않다면 logwr_Gl.mode를 그대로 사용
     }
-  else
+  else 
     {
       /* In the middle of sending the pages which are already flushed */
+      // 아직 로그 페이지를 한번도 받은 적 없는 경우
+      // 서버와의 db일치 여부 확인을 위해 해더 페이지부터 요청
+      
       if (logwr_Gl.last_recv_pageid == NULL_PAGEID)
 	{
 	  /* To check database equality at first, get the header page */
 	  first_pageid_torecv = LOGPB_HEADER_PAGE_ID;
 	}
-      else
+      else // 이미 로그를 받은 상태라면
 	{
 	  /* When it overtakes the state of the server, it set ha_file_state is sync'ed. And, the flush action is not
 	   * sync'ed with the server. So, it requests the last page again to get the missing log records. */
 	  if (logwr_Gl.hdr.ha_file_status == LOG_HA_FILESTAT_SYNCHRONIZED)
 	    {
-	      first_pageid_torecv = logwr_Gl.last_recv_pageid;
+	      first_pageid_torecv = logwr_Gl.last_recv_pageid; 
+        // 동기 누락이 있을 가능성이 있으므로 다시한번 요청
 	    }
 	  else
 	    {
+        // 일반적으로는 +1 위치의 페이지를 요청
 	      first_pageid_torecv = logwr_Gl.last_recv_pageid + 1;
 	    }
 	}

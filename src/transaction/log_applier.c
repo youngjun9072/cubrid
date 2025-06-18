@@ -3160,6 +3160,11 @@ la_get_item_pk_value(LA_ITEM *item)
 static LA_ITEM *
 la_make_repl_item(LOG_PAGE *log_pgptr, int log_type, int tranid, LOG_LSA *lsa)
 {
+  // log_pgptr 로그 페이지 전체
+  // offset log_record_header + lsa->offset 이후 실제 레코드 위치
+  // repl log = 헤더 역할
+  // repl_log->length  = 실제 레코드 길이
+  // area = repl_log_pgptr->area + offset 부터 length만큼 복사한 버퍼
   int error = NO_ERROR;
   LA_ITEM *item = NULL;
   LOG_REC_REPLICATION *repl_log;
@@ -4338,6 +4343,7 @@ la_get_overflow_recdes(LOG_RECORD_HEADER *log_record, void *logs, RECDES *recdes
   int length = 0;
 
   LSA_COPY(&current_lsa, &log_record->prev_tranlsa); // 타겟 레코드의 이전 트랜잭션 로그 주소로 이동해 연결된 오버플로우 로그를 추적
+  // todo: 안쓰는 변수
   prev_vpid.pageid = ((LOG_REC_UNDOREDO *)logs)->data.pageid;
   prev_vpid.volid = ((LOG_REC_UNDOREDO *)logs)->data.volid;
 
@@ -4580,7 +4586,7 @@ la_get_next_update_log(LOG_RECORD_HEADER *prev_lrec, LOG_PAGE *pgptr, void **log
             {
               zip_len = GET_ZIP_LEN(temp_length);
               la_log_copy_fromlog(NULL, *data, &zip_len, pageid, offset, pg);
-
+              
               if (zip_len != 0)
               {
                 if (!log_unzip(redo_unzip_data, zip_len, *data))
@@ -4605,9 +4611,10 @@ la_get_next_update_log(LOG_RECORD_HEADER *prev_lrec, LOG_PAGE *pgptr, void **log
             }
             else
             {
+              // 비압축 데이터 복사, data 안에 들어가있음
               la_log_copy_fromlog(rec_type ? *rec_type : NULL, *data, &length, pageid, offset, pg);
             }
-
+            // data는 채워져있으므로 길이만 조정
             *d_length = length;
 
             if (undo_data != NULL)
@@ -4621,6 +4628,7 @@ la_get_next_update_log(LOG_RECORD_HEADER *prev_lrec, LOG_PAGE *pgptr, void **log
       }
       else if (lrec->trid == prev_lrec->trid && (lrec->type == LOG_COMMIT || lrec->type == LOG_ABORT))
       {
+        // 트렌젝션이 끝났는데도 update로그를 찾지 못한 경우
         return ER_GENERIC_ERROR;
       }
       LSA_COPY(&lsa, &lrec->forw_lsa);
@@ -4697,7 +4705,7 @@ la_get_recdes(LOG_LSA *lsa, LOG_PAGE *pgptr, RECDES *recdes, unsigned int *rcvin
   // 이 시점에서 pgptr은 데이터를 포함한 실제 페이지의 주소값이고,
   // pg 의 데이터 영역 + offset 으로 가져오려는 로그의 해더 주소로 접근한다.
   pg = pgptr;
-  lrec = LOG_GET_LOG_RECORD_HEADER(pg, lsa); // lsa는 타겟의 lsa이고 페이지로부터 타겟 레콛의 디스크립터를 가져옴
+  lrec = LOG_GET_LOG_RECORD_HEADER(pg, lsa); // lsa는 타겟의 lsa이고 페이지로부터 타겟 레코드의 디스크립터를 가져옴
   // recdes는 타겟에 반영할 데이터
   // 로그 내용 조회 및 파싱
   // 추출 내용: recdes->data, recdes->length, rcvindex, logs, rec_type
@@ -4736,10 +4744,12 @@ la_get_recdes(LOG_LSA *lsa, LOG_PAGE *pgptr, RECDES *recdes, unsigned int *rcvin
   }
   else if (*rcvindex == RVHF_INSERT && recdes->type == REC_ASSIGN_ADDRESS)
   {
-    // Insert(RVHF_INSERT) 로그 레코드의 경우 주소 할당만 발생한 것이므로 다음 로그를 더 읽어와야함
+    // Insert(RVHF_INSERT)이고 recdes->type 이 REC_ASSIGN_ADDRESS일경우 
+    // 로그 레코드의 경우 주소 할당만 발생한 것이므로 다음 로그를 더 읽어와야함
+    // redo만 추출
     error = la_get_next_update_log(lrec, pg, &logs, &rec_type, &recdes->data, &recdes->length);
     if (error == NO_ERROR)
-    {
+    { 
       recdes->type = *(INT16 *)(rec_type);
       if (recdes->type == REC_BIGONE)
       {

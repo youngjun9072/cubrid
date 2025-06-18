@@ -4563,7 +4563,7 @@ logpb_get_guess_archive_num (THREAD_ENTRY * thread_p, LOG_PAGEID pageid)
 
   assert (LOG_CS_OWN (thread_p));
 
-  arv_num = logpb_get_archive_num_from_info_table (thread_p, pageid);
+  arv_num = logpb_get_archive_num_from_info_table (thread_p, pageid); // info table
 
   if (arv_num >= 0)
     {
@@ -5223,9 +5223,9 @@ logpb_fetch_from_archive (THREAD_ENTRY * thread_p, LOG_PAGEID pageid, LOG_PAGE *
     }
 
   if (log_Gl.archive.vdes == NULL_VOLDES)
-    {
+    { // 현재 아카이브 로그 볼륨이 마운트되어있지 않다면 마운트 시도
       if (log_Gl.hdr.nxarv_num <= 0)
-	{
+	{ // 아카이브가 하나도 존재하지 않으면 더이상 시도할 수 있는 아카이브가 없음으로 에러
 	  /* We do not have any archives */
 	  er_set (ER_FATAL_ERROR_SEVERITY, ARG_FILE_LINE, ER_LOG_NOTIN_ARCHIVE, 1, pageid);
 
@@ -5236,17 +5236,18 @@ logpb_fetch_from_archive (THREAD_ENTRY * thread_p, LOG_PAGEID pageid, LOG_PAGE *
       /*
        * Guess the archive where that page is stored
        */
-
+      // 아카이브가 있는 경우 번호 기반으로 추정해 아카이브 접근
+      // 주어진 pageid가 어떤 아카이브 번호에 속할지 추정하고, 해당 번호 기반으로 문자열 생성
       has_guess_arvnum = true;
       *ret_arv_num = logpb_get_guess_archive_num (thread_p, pageid);
       fileio_make_log_archive_name (arv_name, log_Archive_path, log_Prefix, *ret_arv_num);
 
       error_code = ER_FAILED;
       if (logpb_is_archive_available (thread_p, *ret_arv_num) == true && fileio_is_volume_exist (arv_name) == true)
-	{
+	{ //아카이브가 사용 가능한 상태이며 디스크에 존재한다면 마운트 시도
 	  vdes = fileio_mount (thread_p, log_Db_fullname, arv_name, LOG_DBLOG_ARCHIVE_VOLID, false, false);
 	  if (vdes != NULL_VOLDES)
-	    {
+	    { // 성공시 헤더 페이지 읽고
 	      if (fileio_read (thread_p, vdes, hdr_pgptr, 0, LOG_PAGESIZE) == NULL)
 		{
 		  fileio_dismount (thread_p, vdes);
@@ -5282,7 +5283,7 @@ logpb_fetch_from_archive (THREAD_ENTRY * thread_p, LOG_PAGEID pageid, LOG_PAGE *
 	  arv_hdr = NULL;
 	}
     }
-  else
+  else // 이미 아카이브 로그가 열려있으면 그 값을 이용
     {
       vdes = log_Gl.archive.vdes;
       arv_hdr = &log_Gl.archive.hdr;
@@ -5296,7 +5297,9 @@ logpb_fetch_from_archive (THREAD_ENTRY * thread_p, LOG_PAGEID pageid, LOG_PAGE *
     {
       /* Is the page in current archive log ? */
       if (arv_hdr != NULL && pageid >= arv_hdr->fpageid && pageid <= arv_hdr->fpageid + arv_hdr->npages - 1)
-	{
+	{ // 현재 아카이브에서 찾기 시도
+          // 현재 마운트된 아카이브(arv_hdr)가 있고, 해당 아카이브가 pageid를 포함한다면 
+          // 물리적인 아이디를 계산하고 읽기 시도
 	  /* Find location of logical page in the archive log */
 	  phy_pageid = (LOG_PHY_PAGEID) (pageid - arv_hdr->fpageid + 1);
 
@@ -5354,33 +5357,37 @@ logpb_fetch_from_archive (THREAD_ENTRY * thread_p, LOG_PAGEID pageid, LOG_PAGE *
 	    }
 	  else
 	    {
-	      if (direction == 0)
+	      if (direction == 0) // 방향이 아직 정해지지 않은 상태
+        // 현재 아카이브의 pageid와 비교해 방향결정
 		{
 		  /*
 		   * Define the direction by looking for desired page
 		   */
-		  if (arv_hdr != NULL)
+		  if (arv_hdr != NULL) // 현재 아카이브가 열려있고, 헤더 정보가 있다면
 		    {
-		      if (pageid < arv_hdr->fpageid)
+		      if (pageid < arv_hdr->fpageid) // 찾고자하는 페이지가 현재 아카이브보다 과거면 -1
 			{
 			  /* Try older archives */
 			  direction = -1;
 			}
 		      else
 			{
-			  /* Try newer archives */
+			  /* Try newer archives */ // 찾고자 하는 페이지가 현재 아카이브보다 최신이면 +1(앞)
 			  direction = 1;
 			}
 		    }
-		  else
+		  else // 아직 어떠한 아카이브도 열려있지 않은 상태
 		    {
-		      if (first_time != true)
-			{
-			  if (log_Gl.append.vdes == NULL_VOLDES)
+		      if (first_time != true) // 첫 순서 이후에만 실행
+			{// 초기 추정 실패 후 재탐색
+			  if (log_Gl.append.vdes == NULL_VOLDES)  // 현재 db가 active log 파일을 갖고있지 않음 
+        // 남아있는 아카이브에서 앞(최신)으로 탐색해야함 
+        // 현재 사용 가능한 마지막 로그가 없으므로, pageid를 포함한 아카이브는 최신것 중 하나일 수 있음.
 			    {
 			      direction = 1;
 			    }
-			  else
+			  else // 활성 로그가 존재하면, 이 경우 보통 undo 복원등 과거 로그가 필요
+        // ret_arv_num을 가장 마지막 아카이브 번호로 지정하고 과거 방향으로 탐색
 			    {
 			      /*
 			       * Start looking from the last archive.
@@ -5395,15 +5402,17 @@ logpb_fetch_from_archive (THREAD_ENTRY * thread_p, LOG_PAGEID pageid, LOG_PAGE *
 		    }
 		}
 
-	      if (arv_hdr != NULL)
+	      if (arv_hdr != NULL) // 현재 아카이브 헤더가 있음
 		{
-		  if (direction == -1)
+		  if (direction == -1) // 과거 방향인 경우
 		    {
 		      /*
 		       * Try an older archive.
 		       * The page that I am looking MUST be smaller than the first
 		       * page in current archive
 		       */
+          // 현재 아카이브보다 더 과거의 페이지라면 이전 아카이브(-1)로 이동
+          // 크렇지 않다면 더이상 유효안 아카이브 없음으로 판단
 		      if (pageid < arv_hdr->fpageid)
 			{
 			  *ret_arv_num -= 1;
@@ -5413,7 +5422,7 @@ logpb_fetch_from_archive (THREAD_ENTRY * thread_p, LOG_PAGEID pageid, LOG_PAGE *
 			  *ret_arv_num = -1;
 			}
 		    }
-		  else
+		  else // 미래 방향인 경우
 		    {
 		      /* Try a newer archive. The page that I am looking MUST be larger than the last page in current
 		       * archive */

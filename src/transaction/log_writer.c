@@ -2694,7 +2694,7 @@ xlogwr_get_log_pages (THREAD_ENTRY * thread_p, LOG_PAGEID first_pageid, LOGWR_MO
 		}
 	      pthread_mutex_unlock (&writer_info->flush_end_mutex);
 
-	      continue;
+	      continue; // 일정시간 기다렸다가 다시 while
 	    }
 	  else if (rv == ER_CSS_PTHREAD_MUTEX_LOCK || rv == ER_CSS_PTHREAD_MUTEX_UNLOCK
 		   || rv == ER_CSS_PTHREAD_COND_WAIT)
