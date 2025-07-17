@@ -7494,6 +7494,9 @@ error_exit:
   return error;
 }
 
+// query_columns: DB_QUERY_TYPE의 연결 리스트. SELECT 문 결과 컬럼들의 메타정보
+// name: 찾고자하는 컬럼 이름
+// (out) 일치하는 컬럼이 있으면 그 컬럼 포인터 반환
 static DB_QUERY_TYPE *
 query_get_column_with_name (DB_QUERY_TYPE * query_columns, const char *name)
 {
@@ -7505,11 +7508,14 @@ query_get_column_with_name (DB_QUERY_TYPE * query_columns, const char *name)
     {
       return NULL;
     }
-
+   // 입력받은 이름을 소문자로 변환해 real_name에 저장
   sm_downcase_name (name, real_name, SM_MAX_IDENTIFIER_LENGTH);
+  // 컬럼 리스트 순회. db_query_format_next 는 다음 컬럼 반환
   for (column = query_columns; column != NULL; column = db_query_format_next (column))
     {
+      // 컬럼 이름도 소무문자 변환
       sm_downcase_name (db_query_format_name (column), column_name, SM_MAX_IDENTIFIER_LENGTH);
+      // 비교 후 동일하면 컬럼 반환
       if (intl_identifier_casecmp (real_name, column_name) == 0)
 	{
 	  return column;
@@ -7563,7 +7569,7 @@ do_add_attributes (PARSER_CONTEXT * parser, DB_CTMPL * ctemplate, PT_NODE * atts
   int error = NO_ERROR;
 
   crt_attr = atts;
-  while (crt_attr)
+  while (crt_attr) // attrs 에 들어있는 속성 중 select 절의 컬럼 목록(create_select_columns)에 없는 것들을 먼저 처리
     {
       const char *const attr_name = get_attr_name (crt_attr);
       if (query_get_column_with_name (create_select_columns, attr_name) == NULL)
@@ -7577,6 +7583,9 @@ do_add_attributes (PARSER_CONTEXT * parser, DB_CTMPL * ctemplate, PT_NODE * atts
       crt_attr = crt_attr->next;
     }
 
+    // select 절 속성 처리
+    // atts 에 이미 있는 이름이면 true 플래그로 다시 추가
+    // 그렇지 않으면 do_add_attribute_from_select_column() 으로 새롭게 생성
   for (column = create_select_columns; column != NULL; column = db_query_format_next (column))
     {
       const char *const col_name = db_query_format_name (column);
@@ -7598,7 +7607,11 @@ do_add_attributes (PARSER_CONTEXT * parser, DB_CTMPL * ctemplate, PT_NODE * atts
 	    }
 	}
     }
-
+    /*
+    둘다 컬럼 목록이지만 출처와 성격 다름
+    atts 는 DDL로 전달되는 명시적으로 작성된 속성 정의 리스트
+    create_select_columns로 전달되는 AS SELECT 절에서 유도된 컬럼 목록
+    */
   return error;
 }
 
@@ -9125,6 +9138,8 @@ do_create_entity (PARSER_CONTEXT * parser, PT_NODE * node)
     }
   else
     {
+      // create like 일 경우 
+      // select 절의 결과가 query_columns 에 들어있음
       error = do_create_local (parser, ctemplate, node, query_columns);
     }
 
