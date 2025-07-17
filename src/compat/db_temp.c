@@ -182,6 +182,7 @@ dbt_copy_class (const char *new_name, const char *existing_name, SM_CLASS ** cla
  * def (in)  : Class template.
  * name (in) : Class name.
  */
+// 새로 정의중인 클래스(또는 뷰)의 이름을 예약하고, 충돌이 없으면 그대로 템플릿포인터를 반환하며, 이름 충돌시 오류처리 후 NULL
 static DB_CTMPL *
 dbt_reserve_name (DB_CTMPL * def, const char *name)
 {
@@ -191,7 +192,9 @@ dbt_reserve_name (DB_CTMPL * def, const char *name)
   assert (def != NULL);
   assert (name != NULL);
 
+  // 이름 예약 시도. 내부적으로 메타데이터(디렉토리, 시스템 테이블 등) def->name 이 이미 존재하는지 검사하고 없다면 예약
   reserved = locator_reserve_class_name (def->name, &class_oid);
+  
   if (reserved != LC_CLASSNAME_RESERVED)
     {
       if (reserved == LC_CLASSNAME_EXIST)

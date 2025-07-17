@@ -693,6 +693,11 @@ check_domain_class_type (SM_TEMPLATE * template_, DB_OBJECT * domain_classobj)
  *   class_type(in): type of class
  */
 
+ /*
+ 새로운 클래스 정의 시작. 빈 템플릿을 생성하여 반환한다.
+ 클래스 이름은 이 시점에 서버에 등록되지 않으며, 템플릿이 sm_update_class로 적용될 때 등록이 이뤄짐
+ */
+
 static SM_TEMPLATE *
 def_class_internal (const char *name, int class_type)
 {
@@ -700,9 +705,9 @@ def_class_internal (const char *name, int class_type)
   SM_TEMPLATE *template_ = NULL;
   PR_TYPE *type;
 
-  if (sm_check_name (name))
+  if (sm_check_name (name)) // 이름 벨리데이션
     {
-      const char *class_name = sm_remove_qualifier_name (name);
+      const char *class_name = sm_remove_qualifier_name (name); // 스키마나 네임스페이스 접두어 제거
 
       type = pr_find_type (class_name);
       if (type != NULL)

@@ -1096,12 +1096,26 @@ int tran_system_savepoint(const char *savept_name)
  *              There are no limits on the number of savepoints that a
  *              transaction can have.
  */
+/*
+현재 트랜잭션에 대해 세이브 포인트가 설정됨.
+이후의 트랜잭션 작업은 이 세이브 포인트로 롤백할 수 있음
+이 동작을 부분적 중단(롤백)이라고 함. 
+즉, 세이브 포인트 이후 수행되는 모든 데이터 베이스 작업은 "undone" 되고, 세이브 포인트 이전의 모든 효과는 유지됨
+그 후 다른 트랜잭션은 다른 sql 문장을 계속 실행할 수 있음. 
+동일한 세이브 포인트로 반복해서 중단해도 허용됨
+동일한 세이브 포인트 이름이 동일 트랜잭션 내에서 여러번 선언되면, 
+그 이름으로 사용할 수 있는 것은 가장 마지막에 선언된 세이브 포인트뿐이며,
+이전 선언들은 모두 무시됨. 
+트랜잭션이 가질 수 있는 세이브 포인트 수에는 제한이 없음.
+*/
 int tran_savepoint_internal(const char *savept_name, SAVEPOINT_TYPE savepoint_type)
 {
   LOG_LSA savept_lsa;
   int error_code = NO_ERROR;
 
   /* Flush all dirty objects */
+  // 더티 객체 플러시 검사
+  // 플러시할 변경 사항이 있는지 검사 한 후 모든 더티 페이지를 플러시한다.
   if (ws_need_flush())
   {
     error_code = locator_all_flush();
@@ -1114,7 +1128,7 @@ int tran_savepoint_internal(const char *savept_name, SAVEPOINT_TYPE savepoint_ty
       return error_code;
     }
   }
-
+  // 서버 세이브 포인트 설정
   if (tran_server_savepoint(savept_name, &savept_lsa) != NO_ERROR)
   {
     assert(er_errid() != NO_ERROR);
@@ -1123,6 +1137,7 @@ int tran_savepoint_internal(const char *savept_name, SAVEPOINT_TYPE savepoint_ty
   }
 
   /* add savepoint to local list */
+  // 로컬 세이브 포인트 리스트 등록
   if (savepoint_type == USER_SAVEPOINT)
   {
     error_code = tran_add_savepoint(savept_name);
@@ -1131,6 +1146,7 @@ int tran_savepoint_internal(const char *savept_name, SAVEPOINT_TYPE savepoint_ty
       return error_code;
     }
   }
+  // 서버 세이브 포인트와 로컬 세이브 포인트 차이는??
 
   return error_code;
 }

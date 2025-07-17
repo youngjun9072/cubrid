@@ -8887,11 +8887,13 @@ do_create_entity (PARSER_CONTEXT * parser, PT_NODE * node)
     }
 
   create_select = node->info.create_entity.create_select;
-  if (create_select != NULL)
+  if (create_select != NULL) // create table ... as select 형태에서 select 가 존재하는 경우만
     {
       DB_QUERY_TYPE *column;
-
+      // select 절을 분석해서 반환되는 결과 컬럼 리스트(DB_QUERY_TYPE *query_columns) 를 채움
+      // 이 정보를 기반으로 테이블 컬럼 생성
       error = pt_get_select_query_columns (parser, create_select, &query_columns);
+      
       if (error != NO_ERROR)
 	{
 	  goto error_exit;
@@ -8938,7 +8940,9 @@ do_create_entity (PARSER_CONTEXT * parser, PT_NODE * node)
   switch (node->info.create_entity.entity_type)
     {
     case PT_CLASS:
-
+        // in_not_exists(?) 이고, 이미 같은 이름의 클래스(테이블)가 존재하면 error_exit
+        // error_exit 에서는 에러를 반환하는데, 
+        // 이 단계에서는 위에 코드에서 error 변수에 변경이 없엇으므로 no error 리턴
       if (node->info.create_entity.if_not_exists == 1 && db_find_class (class_name))
 	{
 	  goto error_exit;
@@ -8947,7 +8951,7 @@ do_create_entity (PARSER_CONTEXT * parser, PT_NODE * node)
       /* here we need to check if the super classes are partitioned, as it is not allowed to inherit from partition
        * tables. */
       super_node = node->info.create_entity.supclass_list;
-
+      // 슈퍼 노드들을 순회하면서 슈퍼 클래스가 파티션 테이블인지 확인
       while (super_node)
 	{
 	  super_class = db_find_class (super_node->info.name.original);
@@ -8960,6 +8964,8 @@ do_create_entity (PARSER_CONTEXT * parser, PT_NODE * node)
 	    }
 	  else
 	    {
+        // 파티션 테이블인지 확인 
+        // 이 함수는 파티션 테이블일 경우 양수를 반환하며, 양수일 경우 ER_INHERIT_FROM_PARTITION_TABLE 에러
 	      error = sm_is_partitioned_class (super_class);
 	      if (error < 0)
 		{
@@ -8975,7 +8981,7 @@ do_create_entity (PARSER_CONTEXT * parser, PT_NODE * node)
 
 	  super_node = super_node->next;
 	}
-
+    // 테이블을 순환 및 파싱해 각 변수에 값을 넣음
       for (tbl_opt = node->info.create_entity.table_option_list; tbl_opt != NULL; tbl_opt = tbl_opt->next)
 	{
 	  assert (tbl_opt->node_type == PT_TABLE_OPTION);
@@ -9005,7 +9011,8 @@ do_create_entity (PARSER_CONTEXT * parser, PT_NODE * node)
 	      break;
 	    }
 	}
-
+      // 암호화 옵션이 있으면 암호화 모듈이 메모리에 로드됐는지 확인
+      // ??? 왜 로드는 안하고 확인만?
       if (tbl_opt_encrypt)
 	{
 	  int tde_loaded = 0;
@@ -9019,12 +9026,14 @@ do_create_entity (PARSER_CONTEXT * parser, PT_NODE * node)
 	}
 
       /* get default value of reuse_oid from system parameter, if don't use table option related reuse_oid */
+      // found_reuse_oid_option 을 사용자가 지정하지 않으면 시스템 파라미터(PRM_ID_TB_DEFAULT_REUSE_OID)로 기본값을 설정
       if (!found_reuse_oid_option)
 	{
 	  reuse_oid = prm_get_bool_value (PRM_ID_TB_DEFAULT_REUSE_OID);
 	}
 
       /* validate charset and collation options, if any */
+      // 사용자 지정 문자셋, 콜레이션 벨리데이션
       cs_node = (tbl_opt_charset) ? tbl_opt_charset->info.table_option.val : NULL;
       coll_node = (tbl_opt_coll) ? tbl_opt_coll->info.table_option.val : NULL;
       charset = LANG_SYS_CODESET;
@@ -9037,7 +9046,7 @@ do_create_entity (PARSER_CONTEXT * parser, PT_NODE * node)
 	      goto error_exit;
 	    }
 	}
-
+    // 세이브 포인트. 이 지점 이후 발생하는 모든 DDL 작업을 롤백하게 만듦
       error = tran_system_savepoint (UNIQUE_SAVEPOINT_CREATE_ENTITY);
       if (error != NO_ERROR)
 	{
@@ -9047,10 +9056,12 @@ do_create_entity (PARSER_CONTEXT * parser, PT_NODE * node)
 
       if (create_like)
 	{
+    //  create... like 구문이면 기존 클래스 복사
 	  ctemplate = dbt_copy_class (class_name, create_like, &source_class);
 	}
       else
 	{
+    // 새 탬플릿 생성
 	  ctemplate = dbt_create_class (class_name);
 	}
       break;
