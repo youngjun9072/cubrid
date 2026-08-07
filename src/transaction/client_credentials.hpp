@@ -85,7 +85,6 @@ typedef struct boot_client_credential BOOT_CLIENT_CREDENTIAL;
 struct boot_client_credential : public clientids
 {
   std::string db_name;		/* DB_MAX_IDENTIFIER_LENGTH */
-  std::string db_password;		/* DB_MAX_PASSWORD_LENGTH */
   char *preferred_hosts;	/* LINE_MAX */
   int connect_order;
 
@@ -93,12 +92,18 @@ struct boot_client_credential : public clientids
   ~boot_client_credential () override;
 
   const char *get_db_name () const;
-  const char *get_db_password () const;
 
   // packable_object
   virtual size_t get_packed_size (cubpacking::packer &serializator, std::size_t start_offset = 0) const override;
   virtual void pack (cubpacking::packer &serializator) const override;
   virtual void unpack (cubpacking::unpacker &deserializator) override;
 };
+
+typedef struct
+{
+  BOOT_CLIENT_CREDENTIAL  client_credential;
+  char *password;
+} BOOT_CLIENT_CREDENTIAL_SUB;
+
 
 #endif // !_CLIENT_CREDENTIALS_HPP_

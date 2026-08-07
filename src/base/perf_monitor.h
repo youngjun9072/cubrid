@@ -453,17 +453,6 @@ typedef enum
   PSTAT_HEAP_VACUUM_EXECUTE,
   PSTAT_HEAP_VACUUM_LOG,
 
-  /* Execution statistics for the heap manager */
-  /* best space info */
-  PSTAT_HEAP_STATS_SYNC_BESTSPACE,
-  PSTAT_HF_NUM_STATS_ENTRIES,
-  PSTAT_HF_NUM_STATS_MAXED,
-  PSTAT_HF_BEST_SPACE_ADD,
-  PSTAT_HF_BEST_SPACE_DEL,
-  PSTAT_HF_BEST_SPACE_FIND,
-  PSTAT_HF_HEAP_FIND_PAGE_BEST_SPACE,
-  PSTAT_HF_HEAP_FIND_BEST_PAGE,
-
   /* B-tree ops detailed statistics. */
   PSTAT_BT_FIX_OVF_OIDS,
   PSTAT_BT_UNIQUE_RLOCKS,
@@ -990,8 +979,7 @@ perfmon_add_at_offset (THREAD_ENTRY * thread_p, int offset, UINT64 amount)
 #if defined (SERVER_MODE) || defined (SA_MODE)
   /* Update local statistic */
   tran_index = LOG_FIND_THREAD_TRAN_INDEX (thread_p);
-  assert (tran_index >= 0 && tran_index < pstat_Global.n_trans);
-  if (pstat_Global.is_watching[tran_index])
+  if ((tran_index >= 0 && tran_index < pstat_Global.n_trans) && pstat_Global.is_watching[tran_index])
     {
       if (thread_p != NULL && thread_p->m_uses_px_stats)
 	{
@@ -1514,8 +1502,7 @@ struct perfmon_client_stat_info
   UINT64 *current_global_stats;
 };
 
-extern bool perfmon_Iscollecting_stats;
-
+extern void disable_perfmon_start_stats ();
 extern int perfmon_start_stats (bool for_all_trans);
 extern int perfmon_stop_stats (void);
 extern void perfmon_reset_stats (void);

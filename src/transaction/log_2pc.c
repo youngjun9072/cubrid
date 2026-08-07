@@ -29,7 +29,12 @@
 #include "connection_error.h"
 #endif /* SERVER_MODE */
 #include "error_manager.h"
+#include "dblink_scan.h"
 #include "dblink_2pc.h"
+#ifdef CCI_XA
+#include "dblink_2pc_daemon.h"
+#include "dblink_global_tran_catalog.h"
+#endif
 #include "lock_manager.h"
 #include "log_append.hpp"
 #include "log_comm.h"
@@ -41,6 +46,7 @@
 #include "page_buffer.h"
 #include "storage_common.h"
 #include "system_parameter.h"
+#include "fault_injection.h"
 
 #if !defined(WINDOWS)
 #include "tcp.h"		/* for css_gethostid */
@@ -88,7 +94,7 @@ static int log_2pc_get_num_participants (int *partid_len, void **block_particps_
 static int log_2pc_make_global_tran_id (TRANID tranid);
 static bool log_2pc_check_duplicate_global_tran_id (int gtrid);
 static int log_2pc_commit_first_phase (THREAD_ENTRY * thread_p, LOG_TDES * tdes, LOG_2PC_EXECUTE execute_2pc_type,
-				       bool * decision);
+				       bool * decision, TRAN_STATE * state);
 static TRAN_STATE log_2pc_commit_second_phase (THREAD_ENTRY * thread_p, LOG_TDES * tdes, bool * decision);
 static void log_2pc_append_start (THREAD_ENTRY * thread_p, LOG_TDES * tdes);
 static void log_2pc_append_decision (THREAD_ENTRY * thread_p, LOG_TDES * tdes, LOG_RECTYPE decsion);
@@ -434,9 +440,22 @@ log_2pc_check_duplicate_global_tran_id (int gtrid)
  * Note:
  */
 static int
-log_2pc_commit_first_phase (THREAD_ENTRY * thread_p, LOG_TDES * tdes, LOG_2PC_EXECUTE execute_2pc_type, bool * decision)
+log_2pc_commit_first_phase (THREAD_ENTRY * thread_p, LOG_TDES * tdes, LOG_2PC_EXECUTE execute_2pc_type, bool * decision,
+			    TRAN_STATE * state)
 {
-  int i;
+#ifdef CCI_XA
+  if (tdes->coord == NULL)
+    {
+      assert (tdes->coord != NULL);
+      return ER_FAILED;
+    }
+
+  int i, error;
+  DBLINK_CONN_INFO *participants = (DBLINK_CONN_INFO *) tdes->coord->block_particps_ids;
+  TRAN_STATE expected_state;
+  LOG_RECTYPE complete_type;
+  char new_state;
+#endif
 
   /* Start the first phase of 2PC. Prepare to commit or voting phase */
   if (tdes->state == TRAN_ACTIVE)
@@ -455,8 +474,11 @@ log_2pc_commit_first_phase (THREAD_ENTRY * thread_p, LOG_TDES * tdes, LOG_2PC_EX
 
       /*
        * Start the 2PC for this coordinator
+       * NOTE: When CCI_XA is enabled, _db_global_tran handles recovery instead of LOG_2PC_START log.
        */
+#ifndef CCI_XA
       log_2pc_append_start (thread_p, tdes);
+#endif
 
       if (execute_2pc_type == LOG_2PC_EXECUTE_FULL)
 	{
@@ -465,6 +487,7 @@ log_2pc_commit_first_phase (THREAD_ENTRY * thread_p, LOG_TDES * tdes, LOG_2PC_EX
 	   */
 	  lock_unlock_all_shared_get_all_exclusive (thread_p, NULL);
 	}
+
 #ifdef LOG_2PC_ACK_RECV_REQUIRED
       tdes->coord->ack_received = (bool *) calloc (i);
       if (tdes->coord->ack_received == NULL)
@@ -474,8 +497,108 @@ log_2pc_commit_first_phase (THREAD_ENTRY * thread_p, LOG_TDES * tdes, LOG_2PC_EX
 	  return ER_OUT_OF_VIRTUAL_MEMORY;
 	}
 #endif
+
+#ifdef CCI_XA
+      /* P1: Crash before (1) _db_global_tran INSERT - recovery: participant self rollback */
+      FI_TEST (thread_p, FI_TEST_DBLINK_2PC_CRASH_BEFORE_1, 0);
+      /* Persist participant rows to _db_global_tran (state 'P') before prepare, using server transaction */
+      log_sysop_start (thread_p);
+      for (i = 0; i < tdes->coord->num_particps; i++)
+	{
+	  error = dblink_global_tran_insert_row (thread_p, tdes->gtrid, participants[i].conn_handle,
+						 participants[i].conn_url, participants[i].user_name,
+						 participants[i].password, DBLINK_2PC_STATE_PREPARE);
+	  if (error != NO_ERROR)
+	    {
+	      log_sysop_abort (thread_p);
+	      *state = tdes->state;
+	      return error;
+	    }
+	}
+      log_sysop_commit (thread_p);
+      /* P2: Crash after (1) before (2) SEND XA PREPARE - recovery: daemon ABORT then DELETE */
+      FI_TEST (thread_p, FI_TEST_DBLINK_2PC_CRASH_BETWEEN_1_2, 0);
+#endif
+
       *decision =
 	log_2pc_send_prepare (thread_p, tdes->gtrid, tdes->coord->num_particps, tdes->coord->block_particps_ids);
+
+#ifdef CCI_XA
+      new_state = (*decision) ? DBLINK_2PC_STATE_COMMIT : DBLINK_2PC_STATE_ABORT;
+      /* P3: Crash after (2) before (4) UPDATE state - recovery: daemon ABORT then DELETE */
+      FI_TEST (thread_p, FI_TEST_DBLINK_2PC_CRASH_BETWEEN_2_4, 0);
+      /* Update _db_global_tran state based on decision */
+      for (i = 0; i < tdes->coord->num_particps; i++)
+	{
+	  error = dblink_global_tran_update_state (thread_p, tdes->gtrid, participants[i].conn_handle, new_state);
+	  if (error != NO_ERROR)
+	    {
+	      *state = log_abort_local (thread_p, tdes, false);
+	      return error;
+	    }
+	}
+
+      /* Perform local commit/abort after updating _db_global_tran; on failure return error, catalog update is aborted (will be rolled back) */
+      if (*decision)
+	{
+	  complete_type = LOG_COMMIT;
+	  expected_state = TRAN_UNACTIVE_COMMITTED;
+	  *state = log_commit_local (thread_p, tdes, false, true);
+	  if (*state != TRAN_UNACTIVE_COMMITTED)
+	    {
+	      return ER_FAILED;
+	    }
+	}
+      else
+	{
+	  complete_type = LOG_ABORT;
+	  expected_state = TRAN_UNACTIVE_ABORTED;
+	  *state = log_abort_local (thread_p, tdes, false);
+	  if (*state != TRAN_UNACTIVE_ABORTED)
+	    {
+	      return ER_FAILED;
+	    }
+	}
+
+      /* P4: Crash after (4),(3) before (5) enqueue - recovery: daemon sends decision then DELETE */
+      FI_TEST (thread_p, FI_TEST_DBLINK_2PC_CRASH_BETWEEN_4_6, 0);
+      /* Enqueue one entry per participant for daemon (only failed participants are retried) */
+      for (i = 0; i < tdes->coord->num_particps; i++)
+	{
+#ifdef SERVER_MODE
+	  (void) dblink_2pc_daemon_enqueue (tdes->gtrid, new_state, &participants[i]);
+#else
+	  /* SA mode: no daemon/queue; run send decision and _db_global_tran delete in a system transaction */
+	  log_sysop_start (thread_p);
+	  error = dblink_2pc_send_decision_one_participant (tdes->gtrid, &participants[i], *decision);
+	  if (error == NO_ERROR)
+	    {
+	      int del_err = dblink_global_tran_delete_row (thread_p, tdes->gtrid, participants[i].conn_handle);
+	      if (del_err == NO_ERROR)
+		{
+		  log_sysop_commit (thread_p);
+		}
+	      else
+		{
+		  log_sysop_abort (thread_p);
+		}
+	    }
+	  else
+	    {
+	      log_sysop_abort (thread_p);
+	    }
+#endif
+	}
+
+      *state =
+	log_complete (thread_p, tdes, complete_type, LOG_NEED_NEWTRID,
+		      (*decision) ? LOG_ALREADY_WROTE_EOT_LOG : LOG_NEED_TO_WRITE_EOT_LOG);
+
+      if (*state != expected_state)
+	{
+	  return ER_FAILED;
+	}
+#endif
     }
   else
     {
@@ -592,6 +715,7 @@ log_2pc_commit_second_phase (THREAD_ENTRY * thread_p, LOG_TDES * tdes, bool * de
 	   * and we need to retry sending the decision at another point.
 	   * We have already decided and log the decision in the log file.
 	   */
+	  /* _db_global_tran update and enqueue already done in first_phase */
 	  (void) log_2pc_send_abort_decision (thread_p, tdes->gtrid, tdes->coord->num_particps,
 					      tdes->coord->block_particps_ids);
 	}
@@ -607,6 +731,7 @@ log_2pc_commit_second_phase (THREAD_ENTRY * thread_p, LOG_TDES * tdes, bool * de
 	   * and we need to retry sending the decision at another point.
 	   * We have already decided and log the decision in the log file.
 	   */
+	  /* _db_global_tran update and enqueue already done in first_phase */
 	  (void) log_2pc_send_abort_decision (thread_p, tdes->gtrid, tdes->coord->num_particps,
 					      tdes->coord->block_particps_ids);
 	}
@@ -631,7 +756,7 @@ log_2pc_commit_second_phase (THREAD_ENTRY * thread_p, LOG_TDES * tdes, bool * de
 TRAN_STATE
 log_2pc_commit (THREAD_ENTRY * thread_p, log_tdes * tdes, LOG_2PC_EXECUTE execute_2pc_type, bool * decision)
 {
-  TRAN_STATE state;
+  TRAN_STATE state = tdes->state;
 
   if (tdes->gtrid == LOG_2PC_NULL_GTRID)
     {
@@ -649,9 +774,9 @@ log_2pc_commit (THREAD_ENTRY * thread_p, log_tdes * tdes, LOG_2PC_EXECUTE execut
 
   if (execute_2pc_type == LOG_2PC_EXECUTE_FULL || execute_2pc_type == LOG_2PC_EXECUTE_PREPARE)
     {
-      if (log_2pc_commit_first_phase (thread_p, tdes, execute_2pc_type, decision) != NO_ERROR)
+      if (log_2pc_commit_first_phase (thread_p, tdes, execute_2pc_type, decision, &state) != NO_ERROR)
 	{
-	  return tdes->state;
+	  return state;
 	}
     }
   else
@@ -668,10 +793,33 @@ log_2pc_commit (THREAD_ENTRY * thread_p, log_tdes * tdes, LOG_2PC_EXECUTE execut
 	{
 	  *decision = false;
 	}
+
+      state = tdes->state;
     }
 
+#ifdef CCI_XA
   /*
-   * PHASE II of 2PC: Inform decsion to participants (i.e., either commit or
+   * CCI_XA: FULL/PREPARE flows are completed entirely in phase 1 via log_complete().
+   * log_complete() calls logtb_get_new_tran_id() → logtb_clear_tdes() which resets
+   * tdes->state to TRAN_ACTIVE for the next transaction.  The terminal state
+   * (TRAN_UNACTIVE_COMMITTED or TRAN_UNACTIVE_ABORTED) is captured inside
+   * log_complete() before the reset and returned via the &state out-parameter of
+   * log_2pc_commit_first_phase().  Do NOT read tdes->state here; it no longer holds
+   * the terminal state and would silently return TRAN_ACTIVE to the caller.
+   *
+   * COMMIT_DECISION/ABORT_DECISION arrive when CUBRID acts as an XA resource manager
+   * (e.g. JDBC XA), not as the DBLink coordinator.  Phase 1 was never entered for
+   * those types, so phase 2 must still execute.
+   */
+  if (execute_2pc_type == LOG_2PC_EXECUTE_COMMIT_DECISION || execute_2pc_type == LOG_2PC_EXECUTE_ABORT_DECISION)
+    {
+      state = log_2pc_commit_second_phase (thread_p, tdes, decision);
+    }
+  /* else: FULL/PREPARE — state already holds the correct terminal value from
+   *       log_2pc_commit_first_phase(); leave it unchanged. */
+#else
+  /*
+   * PHASE II of 2PC: Inform decision to participants (i.e., either commit or
    *                  abort)
    */
   if (execute_2pc_type != LOG_2PC_EXECUTE_PREPARE || *decision == false)
@@ -682,6 +830,7 @@ log_2pc_commit (THREAD_ENTRY * thread_p, log_tdes * tdes, LOG_2PC_EXECUTE execut
     {
       state = tdes->state;
     }
+#endif
 
   return state;
 }
@@ -996,10 +1145,10 @@ log_2pc_attach_client (THREAD_ENTRY * thread_p, LOG_TDES * tdes, LOG_TDES * clie
   tdes->isloose_end = false;
   tdes->isolation = client_tdes->isolation;
   tdes->wait_msecs = client_tdes->wait_msecs;
-  /*
-   * The client identification remains the same. So there is not a need
-   * to set clientids.
-   */
+  /* Transfer the connection-level client_id to the prepared slot so that
+   * xboot_unregister_client() matches and properly releases this slot when
+   * the attaching client (daemon or recovery CAS) disconnects. */
+  tdes->client_id = client_tdes->client_id;
 
   /* Return the table entry that is not going to be used anymore */
   logtb_free_tran_index (thread_p, client_tdes->tran_index);
@@ -1069,6 +1218,44 @@ log_2pc_attach_global_tran (THREAD_ENTRY * thread_p, int gtrid)
 
   TR_TABLE_CS_ENTER (thread_p);
 
+#ifdef CCI_XA
+  /*
+   * CCI_XA: The 2PC daemon may arrive before xboot_unregister_client() has promoted
+   * the participant's prepared transaction to a loose-end (i.e., before
+   * net_server_conn_down() runs after the participant CAS closes its TCP socket).
+   * In that window num_prepared_loose_end_indices is still 0, so the normal guard
+   * would falsely return ER_LOG_2PC_UNKNOWN_GTID.  dblink_2pc_send_decision_one_participant()
+   * treats that error as idempotent success (deletes the _db_global_tran row) without
+   * ever committing the participant — the data is silently lost.
+   *
+   * Fix: skip the counter guard and search directly.  If the prepared tdes is found
+   * but not yet marked as a loose-end, promote it now (incrementing the counter) so
+   * that log_2pc_attach_client() can safely decrement it.  When xboot_unregister_client()
+   * eventually fires for the old CAS connection it will see tdes->client_id != conn->client_id
+   * (log_2pc_attach_client updates client_id to the daemon's id) and return early,
+   * so the counter stays balanced.
+   */
+  tdes = log_2pc_find_tran_descriptor (gtrid);
+  if (tdes != NULL)
+    {
+      if (!tdes->isloose_end)
+	{
+	  tdes->isloose_end = true;
+	  log_Gl.trantable.num_prepared_loose_end_indices++;
+	}
+
+      if (log_2pc_attach_client (thread_p, tdes, client_tdes) != NO_ERROR)
+	{
+	  er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_LOG_2PC_CANNOT_ATTACH, 2, gtrid, client_tdes->trid);
+
+	  TR_TABLE_CS_EXIT (thread_p);
+	  return NULL_TRAN_INDEX;
+	}
+
+      TR_TABLE_CS_EXIT (thread_p);
+      return (tdes->tran_index);
+    }
+#else
   if (log_Gl.trantable.num_prepared_loose_end_indices > 0)
     {
       tdes = log_2pc_find_tran_descriptor (gtrid);
@@ -1088,6 +1275,7 @@ log_2pc_attach_global_tran (THREAD_ENTRY * thread_p, int gtrid)
       TR_TABLE_CS_EXIT (thread_p);
       return (tdes->tran_index);
     }
+#endif
 
 error:
 
@@ -1212,7 +1400,7 @@ log_2pc_prepare_global_tran (THREAD_ENTRY * thread_p, int gtrid)
 
   /*
    * Check if the current site is not only a participant but also a
-   * coordinator for some other participnats. If the current site is a
+   * coordinator for some other participants. If the current site is a
    * coordinator of the transaction,its participants must prepare to commit
    * before we can proceed with the prepare to commit. If not all the
    * participants are willing to commit, the prepare to commit cannot be
@@ -1233,6 +1421,14 @@ log_2pc_prepare_global_tran (THREAD_ENTRY * thread_p, int gtrid)
 	}
 
       /* Now proceed as participant of the distributed transaction */
+    }
+
+  /* CBRD-27079 fallback: materialize per-row X-locks for lockless inserts so the prepare record carries them
+   * and restart recovery restores the in-doubt serialization. Vote no if a lock cannot be acquired. Remove
+   * together with CBRD-27079. */
+  if (logtb_2pc_lock_lockless_inserts (thread_p, tdes) != NO_ERROR)
+    {
+      return tdes->state;
     }
 
   lock_unlock_all_shared_get_all_exclusive (thread_p, &acq_locks);
@@ -2196,6 +2392,7 @@ log_2pc_recovery_abort_decision (THREAD_ENTRY * thread_p, LOG_TDES * tdes)
    * If the following function fails, the transaction will be dangling and we
    * need to retry sending the decision at another point.
    * We have already decided and log the decision in the log file.
+   * Note: In CCI_XA, recovery is done via _db_global_tran catalog; this function is not called.
    */
   (void) log_2pc_send_abort_decision (thread_p, tdes->gtrid, tdes->coord->num_particps,
 				      tdes->coord->block_particps_ids);
@@ -2283,8 +2480,8 @@ log_2pc_recovery_aborted_informing_participants (THREAD_ENTRY * thread_p, LOG_TD
    * dangling and we need to retry sending the decision at another
    * point.
    * We have already decided and log the decision in the log file.
+   * Note: In CCI_XA, recovery is done via _db_global_tran catalog; catalog update is not done here.
    */
-
   (void) log_2pc_send_abort_decision (thread_p, tdes->gtrid, tdes->coord->num_particps,
 				      tdes->coord->block_particps_ids);
   (void) log_complete_for_2pc (thread_p, tdes, LOG_ABORT, LOG_DONT_NEED_NEWTRID);
@@ -2324,15 +2521,21 @@ log_2pc_recovery (THREAD_ENTRY * thread_p)
       switch (tdes->state)
 	{
 	case TRAN_UNACTIVE_2PC_COLLECTING_PARTICIPANT_VOTES:
+#ifndef CCI_XA
 	  log_2pc_recovery_collecting_participant_votes (thread_p, tdes);
+#endif
 	  break;
 
 	case TRAN_UNACTIVE_2PC_ABORT_DECISION:
+#ifndef CCI_XA
 	  log_2pc_recovery_abort_decision (thread_p, tdes);
+#endif
 	  break;
 
 	case TRAN_UNACTIVE_2PC_COMMIT_DECISION:
+#ifndef CCI_XA
 	  log_2pc_recovery_commit_decision (thread_p, tdes);
+#endif
 	  break;
 
 	case TRAN_UNACTIVE_WILL_COMMIT:

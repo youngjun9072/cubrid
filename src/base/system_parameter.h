@@ -35,6 +35,7 @@
 #include "porting.h"
 #include "porting_inline.hpp"
 #include "chartype.h"
+#include "db_multi_threads_connections.h"
 
 typedef enum
 {
@@ -502,7 +503,8 @@ enum param_id
 
   PRM_ID_PARALLELISM,
   PRM_ID_MAX_PARALLEL_WORKERS,
-  PRM_ID_PARALLEL_HEAP_SCAN_PAGE_THRESHOLD,
+  PRM_ID_PARALLEL_SCAN_PAGE_THRESHOLD,
+  PRM_ID_PARALLEL_INDEX_SCAN_PAGE_THRESHOLD,
   PRM_ID_PARALLEL_HASH_JOIN_PAGE_THRESHOLD,
   PRM_ID_PARALLEL_SORT_PAGE_THRESHOLD,
 
@@ -520,16 +522,27 @@ enum param_id
   PRM_ID_CSS_RECV_BUDGET_PER_CONNECTION,
   PRM_ID_CSS_SEND_BUDGET_PER_CONNECTION,
 
-  PRM_ID_PAGE_LATCH_TIMEOUT,
+  PRM_ID_PAGE_LATCH_TIMEOUT_IN_MSECS,
 
   PRM_ID_MEMOIZE_MEMORY_LIMIT,
 
   PRM_ID_HOSTVAR_PEEKING,
 
+  PRM_ID_DEFAULT_HISTOGRAM_BUCKET_COUNT,
+
   PRM_ID_LOG_POSTPONE_CACHE_SIZE,
 
+  PRM_ID_UPDATE_STATISTICS_UPDATE_HISTOGRAM,
+
+  PRM_ID_HARDWARE_AFFINITY,
+
+  PRM_ID_BESTSPACE_SHARD_COUNT,
+
+  PRM_ID_BESTSPACE_DISTRIBUTED_INSERT,
+  PRM_ID_BESTSPACE_CACHE_COUNT,
+
   /* change PRM_LAST_ID when adding new system parameters */
-  PRM_LAST_ID = PRM_ID_LOG_POSTPONE_CACHE_SIZE
+  PRM_LAST_ID = PRM_ID_BESTSPACE_CACHE_COUNT
 };
 typedef enum param_id PARAM_ID;
 
@@ -682,14 +695,6 @@ extern "C"
 #define SERVER_SESSION_CHCK  ((PRM_FOR_SESSION | PRM_FOR_SERVER) & ~PRM_CLIENT_SESSION)	// 0x00000104
 #define PRM_SERVER_SESSION(id)  (((GET_PRM (id))->static_flag & SERVER_SESSION_MASK) == SERVER_SESSION_CHCK)
 
-
-/* 
- * for PRM_STORE_PROCEDURE_RETURN_NUMERIC_SIZE
- * PARAM type integer list, first is precision second is scale
- */
-#define PRM_PRECISION	1
-#define PRM_SCALE	2
-
 /*
  * for PRM_ID_PARALLELISM
  */
@@ -728,7 +733,8 @@ extern "C"
 /* when system parameters are loaded, session parameters need to be cached for
  * future clients that connect to broker
  */
-  extern SESSION_PARAM *cached_session_parameters;
+  extern CUB_THREAD_LOCAL SESSION_PARAM *cached_session_parameters;
+  extern void sysprm_load_session_parameters ();
 #endif				/* CS_MODE */
 
   extern const char *prm_get_name (PARAM_ID prm_id);

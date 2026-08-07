@@ -67,6 +67,7 @@ SET_SOURCE_FILES_PROPERTIES(
 add_library(cmdep SHARED ${CMDEP_SOURCES})
 set_target_properties(cmdep PROPERTIES SOVERSION "${CUBRID_MAJOR_VERSION}.${CUBRID_MINOR_VERSION}")
 set_target_properties(cmdep PROPERTIES PUBLIC_HEADER "${CM_COMMON_DIR}/cm_dep.h")
+target_include_directories(cmdep PRIVATE ${EP_INCLUDES})
 target_compile_definitions(cmdep PRIVATE ${COMMON_DEFS})
 target_link_libraries(cmdep LINK_PRIVATE cubridcs)
 if(WIN32)

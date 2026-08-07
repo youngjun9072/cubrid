@@ -41,10 +41,9 @@
 #include "memory_alloc.h"
 #include "server_interface.h"
 #endif /* !SERVER_MODE */
-#if defined (SERVER_MODE) || defined (SA_MODE)
-#include "thread_worker_pool.hpp"
+#if defined (SERVER_MODE)
 #include "thread_daemon.hpp"
-#endif // SERVER_MODE || SA_MODE
+#endif // SERVER_MODE
 #if defined (SERVER_MODE) || defined (SA_MODE)
 #include "thread_manager.hpp"	// for thread_get_thread_entry_info
 #endif // SERVER_MODE or SA_MODE
@@ -81,9 +80,9 @@
 #include "heap_file.h"
 #include "vacuum.h"
 #include "xasl_cache.h"
-#include "load_worker_manager.hpp"
 
 #if defined (SERVER_MODE)
+#include "load_worker_manager.hpp"
 #include "connection_error.h"
 #endif
 
@@ -194,6 +193,7 @@ static void perfmon_peek_thread_daemon_stats (UINT64 * stats);
 
 PSTAT_GLOBAL pstat_Global;
 
+// TODO: Is pstat_Metadata still used meaningfully even in CS_MODE?
 PSTAT_METADATA pstat_Metadata[] = {
   /* Execution statistics for the file io */
   PSTAT_METADATA_INIT_SINGLE_ACC (PSTAT_FILE_NUM_CREATES, "Num_file_creates"),
@@ -379,17 +379,6 @@ PSTAT_METADATA pstat_Metadata[] = {
   PSTAT_METADATA_INIT_COUNTER_TIMER (PSTAT_HEAP_VACUUM_PREPARE, "heap_vacuum_prepare"),
   PSTAT_METADATA_INIT_COUNTER_TIMER (PSTAT_HEAP_VACUUM_EXECUTE, "heap_vacuum_execute"),
   PSTAT_METADATA_INIT_COUNTER_TIMER (PSTAT_HEAP_VACUUM_LOG, "heap_vacuum_log"),
-
-  /* Execution statistics for the heap manager */
-  /* best space info */
-  PSTAT_METADATA_INIT_COUNTER_TIMER (PSTAT_HEAP_STATS_SYNC_BESTSPACE, "heap_stats_sync_bestspace"),
-  PSTAT_METADATA_INIT_SINGLE_PEEK (PSTAT_HF_NUM_STATS_ENTRIES, "Num_heap_stats_bestspace_entries"),
-  PSTAT_METADATA_INIT_SINGLE_ACC (PSTAT_HF_NUM_STATS_MAXED, "Num_heap_stats_bestspace_maxed"),
-  PSTAT_METADATA_INIT_COUNTER_TIMER (PSTAT_HF_BEST_SPACE_ADD, "bestspace_add"),
-  PSTAT_METADATA_INIT_COUNTER_TIMER (PSTAT_HF_BEST_SPACE_DEL, "bestspace_del"),
-  PSTAT_METADATA_INIT_COUNTER_TIMER (PSTAT_HF_BEST_SPACE_FIND, "bestspace_find"),
-  PSTAT_METADATA_INIT_COUNTER_TIMER (PSTAT_HF_HEAP_FIND_PAGE_BEST_SPACE, "heap_find_page_bestspace"),
-  PSTAT_METADATA_INIT_COUNTER_TIMER (PSTAT_HF_HEAP_FIND_BEST_PAGE, "heap_find_best_page"),
 
   /* B-tree detailed statistics. */
   PSTAT_METADATA_INIT_COUNTER_TIMER (PSTAT_BT_FIX_OVF_OIDS, "bt_fix_ovf_oids"),
@@ -645,10 +634,16 @@ static const char *perfmon_stat_thread_stat_name (size_t index);
 STATIC_INLINE void perfmon_get_peek_stats (UINT64 * stats) __attribute__ ((ALWAYS_INLINE));
 
 #if defined(CS_MODE) || defined(SA_MODE)
-bool perfmon_Iscollecting_stats = false;
+static CUB_THREAD_LOCAL bool perfmon_Iscollecting_stats = false;
 
 /* Client execution statistics */
-static PERFMON_CLIENT_STAT_INFO perfmon_Stat_info;
+static CUB_THREAD_LOCAL PERFMON_CLIENT_STAT_INFO perfmon_Stat_info;
+
+void
+disable_perfmon_start_stats ()
+{
+  perfmon_Iscollecting_stats = false;
+}
 
 /*
  * perfmon_start_stats - Start collecting client execution statistics
@@ -2263,8 +2258,6 @@ perfmon_stat_lock_mode_name (const int lock_mode)
       return "IX_LOCK";
     case SIX_LOCK:
       return "SIX_LOCK";
-    case U_LOCK:
-      return "U_LOCK";
     case X_LOCK:
       return "X_LOCK";
     case SCH_M_LOCK:
@@ -4054,7 +4047,6 @@ perfmon_get_peek_stats (UINT64 * stats)
   /* fixme(rem) - will be fixed in stattool patch */
 #if defined (SERVER_MODE) || defined (SA_MODE)
   stats[pstat_Metadata[PSTAT_PC_NUM_CACHE_ENTRIES].start_offset] = xcache_get_entry_count ();
-  stats[pstat_Metadata[PSTAT_HF_NUM_STATS_ENTRIES].start_offset] = heap_get_best_space_num_stats_entries ();
   stats[pstat_Metadata[PSTAT_QM_NUM_HOLDABLE_CURSORS].start_offset] = session_get_number_of_holdable_cursors ();
 #endif /* defined (SERVER_MODE) || defined (SA_MODE) */
 }
@@ -4171,19 +4163,19 @@ static size_t
 thread_stats_count (void)
 {
 #if defined (SERVER_MODE)
-  assert (PERFMON_PORTABLE_WORKER_STAT_COUNT == cubthread::wp_worker_statset_get_count ());
+  assert (PERFMON_PORTABLE_WORKER_STAT_COUNT == cubthread::stats_worker_pool_type::stats::get_count ());
   static bool check_names = true;
   if (check_names)
     {
       for (size_t index = 0; index < PERFMON_PORTABLE_WORKER_STAT_COUNT; index++)
         {
-          if (std::strcmp (perfmon_Portable_worker_stat_names[index], cubthread::wp_worker_statset_get_name (index)) != 0)
+          if (std::strcmp (perfmon_Portable_worker_stat_names[index], cubthread::stats_worker_pool_type::stats::get_name (index)) != 0)
             {
               assert (false);
               _er_log_debug (ARG_FILE_LINE,
                              "Warning - Monitoring thread worker statistics; statistics name not matching for %zu\n"
                              "\t\tperfmon name = %s\n" "\t\tdaemon name = %s\n", index,
-                             perfmon_Portable_worker_stat_names[index], cubthread::wp_worker_statset_get_name (index));
+                             perfmon_Portable_worker_stat_names[index], cubthread::stats_worker_pool_type::stats::get_name (index));
             }
         }
       check_names = false;

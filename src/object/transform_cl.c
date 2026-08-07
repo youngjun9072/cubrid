@@ -4005,7 +4005,7 @@ disk_to_class (OR_BUF * buf, SM_CLASS ** class_ptr)
   DB_OBJLIST *triggers;
   DB_VALUE value;
   int rc = NO_ERROR;
-  char auto_increment_name[AUTO_INCREMENT_SERIAL_NAME_MAX_LENGTH];
+  char auto_increment_name[DB_MAX_IDENTIFIER_LENGTH];
   MOP serial_class_mop = NULL, serial_mop;
   DB_IDENTIFIER serial_obj_id;
 
@@ -4187,7 +4187,12 @@ disk_to_class (OR_BUF * buf, SM_CLASS ** class_ptr)
 		}
 	    }
 
-	  SET_AUTO_INCREMENT_SERIAL_NAME (auto_increment_name, sm_ch_name ((MOBJ) class_), att->header.name);
+	  rc = set_auto_increment_serial_name (auto_increment_name, sm_ch_name ((MOBJ) class_), att->header.name);
+	  if (rc != NO_ERROR)
+	    {
+	      ASSERT_ERROR ();
+	      goto on_error;
+	    }
 	  serial_mop = do_get_serial_obj_id (&serial_obj_id, serial_class_mop, auto_increment_name);
 
 	  /* If this att is inherited from a super class, serial_mop can be NULL. In this case, att->auto_increment
@@ -4379,11 +4384,7 @@ tf_disk_to_class (OID * oid, RECDES * record)
 
   assert (oid != NULL && !OID_ISNULL (oid));
 
-  /* should we assume this ? */
-  if (!tf_Metaclass_class.mc_n_variable)
-    {
-      tf_compile_meta_classes ();
-    }
+  tf_compile_meta_classes ();
 
   class_ = NULL;
 
@@ -4456,11 +4457,7 @@ tf_class_to_disk (MOBJ classobj, RECDES * record)
   int prop_free = 0;
   int repid;
 
-  /* should we assume this ? */
-  if (!tf_Metaclass_class.mc_n_variable)
-    {
-      tf_compile_meta_classes ();
-    }
+  tf_compile_meta_classes ();
 
   /*
    * don't worry about deferred fixup for classes, we don't usually have

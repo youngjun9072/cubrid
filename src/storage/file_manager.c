@@ -3261,13 +3261,21 @@ int
 file_create_ehash (THREAD_ENTRY * thread_p, int npages, bool is_tmp, FILE_EHASH_DES * des_ehash, VFID * vfid)
 {
   FILE_TABLESPACE tablespace;
+  FILE_DESCRIPTORS des, *des_p = NULL;
+
+  if (des_ehash)
+    {
+      memset (&des, 0, sizeof (FILE_DESCRIPTORS));
+      des.ehash = *des_ehash;
+      des_p = &des;
+    }
 
   assert (npages > 0);
 
   /* todo: use temporary file cache? */
 
   FILE_TABLESPACE_FOR_TEMP_NPAGES (&tablespace, npages);
-  return file_create (thread_p, FILE_EXTENDIBLE_HASH, &tablespace, (FILE_DESCRIPTORS *) des_ehash, is_tmp, true, vfid);
+  return file_create (thread_p, FILE_EXTENDIBLE_HASH, &tablespace, des_p, is_tmp, true, vfid);
 }
 
 /*
@@ -3285,14 +3293,21 @@ int
 file_create_ehash_dir (THREAD_ENTRY * thread_p, int npages, bool is_tmp, FILE_EHASH_DES * des_ehash, VFID * vfid)
 {
   FILE_TABLESPACE tablespace;
+  FILE_DESCRIPTORS des, *des_p = NULL;
+
+  if (des_ehash)
+    {
+      memset (&des, 0, sizeof (FILE_DESCRIPTORS));
+      des.ehash = *des_ehash;
+      des_p = &des;
+    }
 
   assert (npages > 0);
 
   /* todo: use temporary file cache? */
 
   FILE_TABLESPACE_FOR_TEMP_NPAGES (&tablespace, npages);
-  return file_create (thread_p, FILE_EXTENDIBLE_HASH_DIRECTORY, &tablespace, (FILE_DESCRIPTORS *) des_ehash, is_tmp,
-		      true, vfid);
+  return file_create (thread_p, FILE_EXTENDIBLE_HASH_DIRECTORY, &tablespace, des_p, is_tmp, true, vfid);
 }
 
 /*
@@ -6810,13 +6825,38 @@ file_get_num_user_pages (THREAD_ENTRY * thread_p, const VFID * vfid, int *n_user
   return NO_ERROR;
 }
 
+int
+file_get_num_data_sectors (THREAD_ENTRY * thread_p, const VFID * vfid, int *n_sectors_out)
+{
+  VPID vpid_fhead;
+  PAGE_PTR page_fhead;
+  FILE_HEADER *fhead;
+  int error_code = NO_ERROR;
+
+  FILE_GET_HEADER_VPID (vfid, &vpid_fhead);
+  page_fhead = pgbuf_fix (thread_p, &vpid_fhead, OLD_PAGE, PGBUF_LATCH_READ, PGBUF_UNCONDITIONAL_LATCH);
+  if (page_fhead == NULL)
+    {
+      ASSERT_ERROR_AND_SET (error_code);
+      return error_code;
+    }
+
+  fhead = (FILE_HEADER *) page_fhead;
+  file_header_sanity_check (thread_p, fhead);
+
+  *n_sectors_out = fhead->n_sector_full + fhead->n_sector_partial;
+  pgbuf_unfix (thread_p, page_fhead);
+
+  return NO_ERROR;
+}
+
 /*
- * file_get_num_total_user_pages () - Output number of user pages in class
+ * file_get_num_total_user_pages () - Output number of heap pages that can store user records in class
  *
  * return                 : Error code
  * thread_p (in)          : Thread entry
  * OID (in)               : Class identifier
- * total_pages (out) : Output number of user pages of class
+ * total_pages (out) : Output number of data pages of class
  */
 int
 file_get_num_total_user_pages (THREAD_ENTRY * thread_p, OID * cls_oid, int *total_pages)
@@ -6825,6 +6865,8 @@ file_get_num_total_user_pages (THREAD_ENTRY * thread_p, OID * cls_oid, int *tota
   OID *partitions = NULL;
   CLS_INFO *cls_info_p = NULL;
   int error = NO_ERROR;
+
+  *total_pages = 0;
 
   if (partition_get_partition_oids (thread_p, cls_oid, &partitions, &count) != NO_ERROR)
     {
@@ -6843,7 +6885,7 @@ file_get_num_total_user_pages (THREAD_ENTRY * thread_p, OID * cls_oid, int *tota
 	      error = ER_FAILED;
 	      goto end;
 	    }
-	  if (file_get_num_user_pages (thread_p, &(cls_info_p->ci_hfid.vfid), &part_pages) != NO_ERROR)
+	  if (heap_get_num_data_pages (thread_p, &cls_info_p->ci_hfid, &part_pages) != NO_ERROR)
 	    {
 	      error = ER_FAILED;
 	      goto end;
@@ -6860,7 +6902,7 @@ file_get_num_total_user_pages (THREAD_ENTRY * thread_p, OID * cls_oid, int *tota
 	  error = ER_FAILED;
 	  goto end;
 	}
-      if (file_get_num_user_pages (thread_p, &(cls_info_p->ci_hfid.vfid), total_pages) != NO_ERROR)
+      if (heap_get_num_data_pages (thread_p, &cls_info_p->ci_hfid, total_pages) != NO_ERROR)
 	{
 	  error = ER_FAILED;
 	  goto end;
@@ -6875,7 +6917,7 @@ end:
     }
   catalog_free_class_info_and_init (cls_info_p);
 
-  return NO_ERROR;
+  return error;
 }
 
 /*

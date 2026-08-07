@@ -184,15 +184,17 @@ set(BUILD_NUMBER ${CUBRID_MAJOR_VERSION}.${CUBRID_MINOR_VERSION}.${CUBRID_PATCH_
 set(BUILD_OS ${CMAKE_SYSTEM_NAME})
 
 # BUILD_TYPE
-if(CMAKE_BUILD_TYPE MATCHES "Debug")
+if(CMAKE_BUILD_TYPE MATCHES "OptDebug")
+  set(BUILD_TYPE "optdebug")
+elseif(CMAKE_BUILD_TYPE MATCHES "Debug")
   set(BUILD_TYPE "debug")
 elseif(CMAKE_BUILD_TYPE MATCHES "Coverage|Profile")
   string(TOLOWER "${CMAKE_BUILD_TYPE} debug" BUILD_TYPE)
 elseif(CMAKE_BUILD_TYPE MATCHES "Release|RelWithDebInfo")
   set(BUILD_TYPE "release")
-else(CMAKE_BUILD_TYPE MATCHES "Debug")
+else()
   set(BUILD_TYPE "unknown")
-endif(CMAKE_BUILD_TYPE MATCHES "Debug")
+endif()
 
 if(MSVC)
   configure_file(cmake/version.rc.cmake version.rc)
@@ -215,12 +217,12 @@ if(UNIX)
     endif(CMAKE_CXX_COMPILER_VERSION VERSION_LESS 4.4.7)
 
     # C flags for both debug and release build
-    set(CMAKE_C_COMMON_FLAGS "-ggdb -fno-omit-frame-pointer")
+    set(CMAKE_C_COMMON_FLAGS "-ggdb -fno-omit-frame-pointer -fPIE")
     # C++ flags for both debug and release build
     set(CMAKE_CXX_COMMON_FLAGS "${CMAKE_C_COMMON_FLAGS} -std=c++17")
 
     # C flags for debug build
-    set(CMAKE_C_DEBUG_FLAGS "-ggdb3 -Wall -fno-inline ${CMAKE_C_COMMON_FLAGS}")
+    set(CMAKE_C_DEBUG_FLAGS "-ggdb3 -Wall -fno-inline -fstack-protector-strong ${CMAKE_C_COMMON_FLAGS}")
     # C++ flags for debug build
     set(CMAKE_CXX_DEBUG_FLAGS "-ggdb3 -Wall -fno-inline ${CMAKE_CXX_COMMON_FLAGS}")
 
@@ -229,12 +231,19 @@ if(UNIX)
     # C++ flags for release build
     set(CMAKE_CXX_RELEASE_FLAGS "-O2 -DNDEBUG -finline-functions ${CMAKE_CXX_COMMON_FLAGS}")
 
+    # C flags for optdebug build (release-level optimization, asserts enabled)
+    set(CMAKE_C_OPTDEBUG_FLAGS "-O2 -finline-functions -ggdb3 -Wall -fstack-protector-strong -DCUBRID_OPTDEBUG ${CMAKE_C_COMMON_FLAGS}")
+    # C++ flags for optdebug build (release-level optimization, asserts enabled)
+    set(CMAKE_CXX_OPTDEBUG_FLAGS "-O2 -finline-functions -ggdb3 -Wall -DCUBRID_OPTDEBUG ${CMAKE_CXX_COMMON_FLAGS}")
+
     set(CMAKE_C_FLAGS_DEBUG "${CMAKE_C_FLAGS_DEBUG} ${CMAKE_C_DEBUG_FLAGS}")
     set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} ${CMAKE_CXX_DEBUG_FLAGS}")
     set(CMAKE_C_FLAGS_RELEASE "${CMAKE_C_FLAGS_RELEASE} ${CMAKE_C_RELEASE_FLAGS}")
     set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} ${CMAKE_CXX_RELEASE_FLAGS}")
     set(CMAKE_C_FLAGS_RELWITHDEBINFO "${CMAKE_C_FLAGS_RELWITHDEBINFO} ${CMAKE_C_RELEASE_FLAGS}")
     set(CMAKE_CXX_FLAGS_RELWITHDEBINFO "${CMAKE_CXX_FLAGS_RELWITHDEBINFO} ${CMAKE_CXX_RELEASE_FLAGS}")
+    set(CMAKE_C_FLAGS_OPTDEBUG "${CMAKE_C_FLAGS_OPTDEBUG} ${CMAKE_C_OPTDEBUG_FLAGS}")
+    set(CMAKE_CXX_FLAGS_OPTDEBUG "${CMAKE_CXX_FLAGS_OPTDEBUG} ${CMAKE_CXX_OPTDEBUG_FLAGS}")
 
     if(WITH_SOURCES)
       set(DEBUG_PREFIX_MAP_FLAG "-fdebug-prefix-map=${CMAKE_SOURCE_DIR}/src=${CMAKE_INSTALL_PREFIX}/src")
@@ -245,12 +254,9 @@ if(UNIX)
       set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} ${DEBUG_PREFIX_MAP_FLAG}")
       set(CMAKE_C_FLAGS_RELWITHDEBINFO "${CMAKE_C_FLAGS_RELWITHDEBINFO} ${DEBUG_PREFIX_MAP_FLAG}")
       set(CMAKE_CXX_FLAGS_RELWITHDEBINFO "${CMAKE_CXX_FLAGS_RELWITHDEBINFO} ${DEBUG_PREFIX_MAP_FLAG}")
+      set(CMAKE_C_FLAGS_OPTDEBUG "${CMAKE_C_FLAGS_OPTDEBUG} ${DEBUG_PREFIX_MAP_FLAG}")
+      set(CMAKE_CXX_FLAGS_OPTDEBUG "${CMAKE_CXX_FLAGS_OPTDEBUG} ${DEBUG_PREFIX_MAP_FLAG}")
     endif(WITH_SOURCES)
-
-    # set has-style
-    set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -Wl,--hash-style=both -static-libstdc++")
-    set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} -Wl,--hash-style=both -static-libstdc++")
-    set(CMAKE_MODULE_LINKER_FLAGS "${CMAKE_MODULE_LINKER_FLAGS} -Wl,--hash-style=both -static-libstdc++")
 
   elseif (CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
   else()
@@ -411,8 +417,9 @@ set(WIN_TOOLS_DIR            ${CMAKE_SOURCE_DIR}/src/win_tools)
 set(XASL_DIR                 ${CMAKE_SOURCE_DIR}/src/xasl)
 set(PARALLEL_QUERY_DIR       ${CMAKE_SOURCE_DIR}/src/query/parallel)
 set(PARALLEL_HASH_JOIN_DIR   ${CMAKE_SOURCE_DIR}/src/query/parallel/px_hash_join)
-set(PARALLEL_HEAP_SCAN_DIR    ${CMAKE_SOURCE_DIR}/src/query/parallel/px_heap_scan)
+set(PARALLEL_SCAN_DIR        ${CMAKE_SOURCE_DIR}/src/query/parallel/px_scan)
 set(PARALLEL_QUERY_EXECUTE_DIR ${CMAKE_SOURCE_DIR}/src/query/parallel/px_query_execute)
+set(OPTIMIZER_HISTOGRAM_DIR    ${CMAKE_SOURCE_DIR}/src/optimizer/histogram)
 
 include_directories(${CMAKE_CURRENT_BINARY_DIR})
 include_directories(
@@ -432,6 +439,7 @@ include_directories(
   src/monitor
   src/object
   src/optimizer
+  src/optimizer/histogram
   src/parser
   src/replication
   src/query
@@ -441,7 +449,8 @@ include_directories(
   src/transaction
   src/xasl
   src/query/parallel/px_hash_join
-  src/query/parallel/px_heap_scan
+  src/query/parallel/px_scan
+  src/query/parallel/px_scan/index
   src/query/parallel
   src/query/parallel/px_query_execute
   )
@@ -593,6 +602,8 @@ configure_file(cmake/config.h.cmake config.h)
 # TODO: merge version.h into config.h ?
 configure_file(cmake/version.h.cmake version.h)
 
+#add_definitions(-DMULTI_CONN_TO_A_SERVER)
+
 # platform specifie configurations
 if(CMAKE_SYSTEM_NAME MATCHES "Linux")
   # Definitions for system
@@ -600,12 +611,12 @@ if(CMAKE_SYSTEM_NAME MATCHES "Linux")
   if(SUPPORT_XA)
     add_definitions(-DCCI_XA)
   endif(SUPPORT_XA)
-  if(CMAKE_BUILD_TYPE MATCHES "Release|RelWithDebInfo")  
-    set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wall -Werror -Wwrite-strings -Wmissing-prototypes -Wredundant-decls -Wclobbered -Wextra -Wno-unused -pthread")
-    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wall -Werror -Wwrite-strings  -Wredundant-decls -Wclobbered -Wextra -Wno-unused -Wno-unused-parameter -pthread")
+  if(CMAKE_BUILD_TYPE MATCHES "Release|RelWithDebInfo")
+    set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wall -Werror -Wformat -Wformat-security -Werror=format-security -Wwrite-strings -Wmissing-prototypes -Wredundant-decls -Wclobbered -Wextra -Wno-unused -Wno-unused-result -pthread")
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wall -Werror -Wformat -Wformat-security -Werror=format-security -Wwrite-strings  -Wredundant-decls -Wclobbered -Wextra -Wno-unused -Wno-unused-result -Wno-unused-parameter -pthread")
   else()
-    set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wall -Wwrite-strings -Wno-cast-qual -Wmissing-prototypes -Wredundant-decls -Wclobbered -Wextra -Wno-unused -Wno-format-security -pthread")
-    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wall -Wwrite-strings -Wno-cast-qual -Wredundant-decls -Wclobbered -Wextra -Wno-unused -Wno-unused-parameter -Wno-format-security -pthread")
+    set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wall -Wformat -Wformat-security -Werror=format-security -Wwrite-strings -Wno-cast-qual -Wmissing-prototypes -Wredundant-decls -Wclobbered -Wextra -Wno-unused -Wno-unused-result -pthread")
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wall -Wformat -Wformat-security -Werror=format-security -Wwrite-strings -Wno-cast-qual -Wredundant-decls -Wclobbered -Wextra -Wno-unused -Wno-unused-result -Wno-unused-parameter -pthread")
   endif()
  
   if(SIZEOF_OFF64_T)
@@ -618,6 +629,18 @@ if(CMAKE_SYSTEM_NAME MATCHES "Linux")
     #set(CMAKE_C_FLAGS "-m32 ${CMAKE_C_FLAGS}")
     #set(CMAKE_CXX_FLAGS "-m32 ${CMAKE_CXX_FLAGS}")
   endif()
+
+  # set hash-style and security hardening linker flags (placed after cmake check_* calls
+  # so that check_type_size/check_include_file test binaries are not linked with -pie,
+  # which would fail because the test objects are not compiled with -fPIC/-fPIE)
+  # These are GNU ld specific flags; guard with CMAKE_COMPILER_IS_GNUCC to avoid
+  # linker errors when building with Clang + lld on Linux.
+  if(CMAKE_COMPILER_IS_GNUCC)
+    set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -Wl,--hash-style=both -Wl,-z,relro,-z,now -pie -static-libstdc++")
+    set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} -Wl,--hash-style=both -Wl,-z,relro,-z,now -static-libstdc++")
+    set(CMAKE_MODULE_LINKER_FLAGS "${CMAKE_MODULE_LINKER_FLAGS} -Wl,--hash-style=both -Wl,-z,relro,-z,now -static-libstdc++")
+  endif(CMAKE_COMPILER_IS_GNUCC)
+
 elseif(CMAKE_SYSTEM_NAME MATCHES "AIX")
   # Definitions for system
   add_definitions(-DGCC -DAIX -D_GNU_SOURCE -DPPC -fsigned-char -D_THREAD_SAFE)
@@ -867,6 +890,11 @@ install(FILES
   DESTINATION ${CUBRID_TMPDIR}
   RENAME README.txt)
 
+if(CMAKE_BUILD_TYPE MATCHES "OptDebug")
+  file(WRITE "${CMAKE_BINARY_DIR}/build_mode.txt" "build_mode=optdebug\n")
+  install(FILES "${CMAKE_BINARY_DIR}/build_mode.txt" DESTINATION ${CUBRID_PREFIXDIR})
+endif()
+
 if(WITH_SOURCES)
   install(DIRECTORY ${CMAKE_SOURCE_DIR}/src/ DESTINATION ${CUBRID_SRCDIR})
   if(WITH_CCI)
@@ -910,9 +938,9 @@ elseif(CMAKE_BUILD_TYPE MATCHES "Coverage")
   set(CUBRID_PACKAGE_FILE_SUFFIX "-coverage")
 elseif(CMAKE_BUILD_TYPE MATCHES "Profile")
   set(CUBRID_PACKAGE_FILE_SUFFIX "-profile")
-else(CMAKE_BUILD_TYPE MATCHES "Debug")
+else()
   set(CUBRID_PACKAGE_FILE_SUFFIX "")
-endif(CMAKE_BUILD_TYPE MATCHES "Debug")
+endif()
 if(WIN32)
   set(CPACK_PACKAGE_FILE_NAME "${PROJECT_NAME}-${CMAKE_SYSTEM_NAME}-x64-${CUBRID_VERSION}${CUBRID_PACKAGE_FILE_SUFFIX}")
   set(CCI_PACKAGE_FILE_NAME "${PROJECT_NAME}-CCI-${CMAKE_SYSTEM_NAME}-x64-${CCI_VERSION}${CUBRID_PACKAGE_FILE_SUFFIX}")

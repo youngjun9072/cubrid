@@ -26,6 +26,11 @@
 
 #ident "$Id$"
 
+#ifdef __cplusplus
+#include <atomic>
+#include "thread_compat.hpp"
+#endif
+
 #include "storage_common.h"
 #include "object_domain.h"
 
@@ -527,6 +532,86 @@ enum
 #define QFILE_CLEAR_FLAG(var, flag)        ((var) &= (flag))
 #define QFILE_IS_FLAG_SET(var, flag)       ((var) & (flag))
 #define QFILE_IS_FLAG_SET_BOTH(var, flag1, flag2) (((var) & (flag1)) && ((var) & (flag2)))
+
+#ifdef __cplusplus
+/* Sector-based data page info for QFILE_LIST_ID.
+ * membuf_tfile: membuf exists only in the first list_id (not in dependent_list_id).
+ * sectors/tfiles: parallel arrays, one entry per disk sector across all dependent list_ids. */
+typedef struct qfile_list_sector_info QFILE_LIST_SECTOR_INFO;
+struct qfile_list_sector_info
+{
+  // *INDENT-OFF*
+  struct qmgr_temp_file *membuf_tfile;	/* tfile owning membuf pages (NULL = none) */
+  struct file_partial_sector *sectors;	/* data page sectors (FTAB excluded) */
+  void **tfiles;			/* parallel array: tfile per sector */
+  int sector_cnt;
+
+  qfile_list_sector_info ()
+    : membuf_tfile (NULL)
+    , sectors (NULL)
+    , tfiles (NULL)
+    , sector_cnt (0)
+  {
+    //
+  }
+
+  // *INDENT-ON*
+};
+#endif /*  __cplusplus */
+
+#ifdef __cplusplus
+/* Sector-based parallel page scan distribution state.
+ * Wraps QFILE_LIST_SECTOR_INFO with the atomic cursors workers use to coordinate. */
+typedef struct qfile_list_sector_scan_info QFILE_LIST_SECTOR_SCAN_INFO;
+struct qfile_list_sector_scan_info
+{
+  // *INDENT-OFF*
+  QFILE_LIST_SECTOR_INFO sector_info;	/* sector layout (from qfile_collect_list_sector_info) */
+  std::atomic<bool> membuf_claimed;	/* atomic flag: one worker claims all membuf pages */
+  std::atomic<int> next_sector_index;	/* atomic cursor for sector distribution */
+
+  qfile_list_sector_scan_info ()
+    : sector_info ()
+    , membuf_claimed (false)
+    , next_sector_index (0)
+  {
+    //
+  }
+  // *INDENT-ON*
+};
+#endif /*  __cplusplus */
+
+#ifdef __cplusplus
+/*
+ * sector_page_iterator
+ *
+ * Per-thread sector-based page iterator over a QFILE_LIST_ID's data pages.
+ * Phase 1: one worker (the CAS winner of membuf_claimed) iterates the
+ *          membuf region sequentially.
+ * Phase 2: all workers split disk pages by atomically claiming sectors
+ *          via next_sector_index and walking each sector's bitmap.
+ */
+// *INDENT-OFF*
+class sector_page_iterator
+{
+  public:
+    sector_page_iterator ();
+
+    PAGE_PTR get_next_page (THREAD_ENTRY *thread_p, QFILE_LIST_SECTOR_SCAN_INFO &sector_scan);
+
+    inline struct qmgr_temp_file *get_current_tfile () const { return m_current_tfile; }
+    inline VPID get_current_vpid () const { return m_last_vpid; }
+
+  private:
+    int m_membuf_index;		/* -1 = initial, >=0 = CAS winner iterating membuf, -2 = not winner */
+    int m_sector_index;
+    UINT64 m_current_bitmap;
+    VSID m_current_vsid;
+    VPID m_last_vpid;		/* VPID of the last returned page */
+    struct qmgr_temp_file *m_current_tfile;
+};
+// *INDENT-ON*
+#endif /* __cplusplus */
 
 /* SORTING RELATED DEFINITIONS */
 

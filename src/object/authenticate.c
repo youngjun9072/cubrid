@@ -103,6 +103,18 @@ au_ctx (void)
   return au_ctx_obj;
 }
 
+#if defined(CS_MODE) && defined(MULTI_CONN_TO_A_SERVER)
+void
+au_ctx_destructor (void)
+{
+  if (au_ctx_obj != nullptr)
+    {
+      delete au_ctx_obj;
+      au_ctx_obj = nullptr;
+    }
+}
+#endif
+
 /*
  * DB_ EXTENSION FUNCTIONS
  */
@@ -244,7 +256,7 @@ au_set_get_obj (DB_SET * set, int index, MOP * obj)
  *
  * Note: The db_root class used to have a user attribute which was a set
  *       containing the object-id for all users.  The users attribute has been
- *       eliminated for performance reasons.  A query on the db_user class is
+ *       eliminated for performance reasons.  A query on the _db_user class is
  *       new used to find all users.
  */
 void
@@ -313,7 +325,8 @@ au_dump_user (MOP user, FILE * fp)
   groups = NULL;
   if (au_get_set (user, "direct_groups", &groups) == NO_ERROR)
     {
-      fprintf (fp, msgcat_message (MSGCAT_CATALOG_CUBRID, MSGCAT_SET_AUTHORIZATION, MSGCAT_AUTH_USER_DIRECT_GROUPS));
+      fprintf (fp, "%s",
+	       msgcat_message (MSGCAT_CATALOG_CUBRID, MSGCAT_SET_AUTHORIZATION, MSGCAT_AUTH_USER_DIRECT_GROUPS));
       card = set_cardinality (groups);
       for (i = 0; i < card; i++)
 	{
@@ -333,7 +346,7 @@ au_dump_user (MOP user, FILE * fp)
   groups = NULL;
   if (au_get_set (user, "groups", &groups) == NO_ERROR)
     {
-      fprintf (fp, msgcat_message (MSGCAT_CATALOG_CUBRID, MSGCAT_SET_AUTHORIZATION, MSGCAT_AUTH_USER_GROUPS));
+      fprintf (fp, "%s", msgcat_message (MSGCAT_CATALOG_CUBRID, MSGCAT_SET_AUTHORIZATION, MSGCAT_AUTH_USER_GROUPS));
       card = set_cardinality (groups);
       for (i = 0; i < card; i++)
 	{
@@ -370,7 +383,7 @@ au_dump_user (MOP user, FILE * fp)
  *
  * Note: The db_root class used to have a user attribute which was a set
  *       containing the object-id for all users.  The users attribute has been
- *       eliminated for performance reasons.  A query on the db_user class is
+ *       eliminated for performance reasons.  A query on the _db_user class is
  *       new used to find all users.
  */
 void
@@ -400,7 +413,7 @@ au_dump_to_file (FILE * fp)
       /* error is row count if not negative. */
       if (error > 0)
 	{
-	  fprintf (fp, msgcat_message (MSGCAT_CATALOG_CUBRID, MSGCAT_SET_AUTHORIZATION, MSGCAT_AUTH_ROOT_USERS));
+	  fprintf (fp, "%s", msgcat_message (MSGCAT_CATALOG_CUBRID, MSGCAT_SET_AUTHORIZATION, MSGCAT_AUTH_ROOT_USERS));
 	  while (db_query_next_tuple (query_result) == DB_CURSOR_SUCCESS)
 	    {
 	      if (db_query_get_tuple_value (query_result, 0, &user_val) == NO_ERROR)
@@ -439,7 +452,7 @@ au_dump_to_file (FILE * fp)
       free_and_init (query);
     }
 
-  fprintf (fp, msgcat_message (MSGCAT_CATALOG_CUBRID, MSGCAT_SET_AUTHORIZATION, MSGCAT_AUTH_AUTH_TITLE));
+  fprintf (fp, "%s", msgcat_message (MSGCAT_CATALOG_CUBRID, MSGCAT_SET_AUTHORIZATION, MSGCAT_AUTH_AUTH_TITLE));
   au_dump_auth (fp);
 }
 
@@ -517,4 +530,49 @@ void
 au_disable_passwords (void)
 {
   AU_DISABLE_PASSWORDS ();
+}
+
+int
+au_set_new_timestamps (MOP obj)
+{
+  DB_VALUE current_datetime;
+  int save;
+  int error = NO_ERROR;
+
+  if (db_sys_datetime (&current_datetime) != NO_ERROR)
+    {
+      return er_errid ();
+    }
+
+  AU_SAVE_AND_DISABLE (save);
+  if (obj_set (obj, "created_time", &current_datetime) != NO_ERROR ||
+      obj_set (obj, "updated_time", &current_datetime) != NO_ERROR)
+    {
+      error = er_errid ();
+    }
+  AU_RESTORE (save);
+
+  return error;
+}
+
+int
+au_update_timestamps (MOP obj)
+{
+  DB_VALUE current_datetime;
+  int save;
+  int error = NO_ERROR;
+
+  if (db_sys_datetime (&current_datetime) != NO_ERROR)
+    {
+      return er_errid ();
+    }
+
+  AU_SAVE_AND_DISABLE (save);
+  if (obj_set (obj, "updated_time", &current_datetime) != NO_ERROR)
+    {
+      error = er_errid ();
+    }
+  AU_RESTORE (save);
+
+  return error;
 }

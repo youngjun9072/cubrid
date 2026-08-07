@@ -461,6 +461,8 @@ fetch_peek_arith (THREAD_ENTRY * thread_p, REGU_VARIABLE * regu_var, val_descr *
     case T_ASCII:
     case T_SPACE:
     case T_MD5:
+    case T_UUID_FORMAT:
+    case T_UUID:
     case T_SHA_ONE:
     case T_TO_BASE64:
     case T_FROM_BASE64:
@@ -509,6 +511,11 @@ fetch_peek_arith (THREAD_ENTRY * thread_p, REGU_VARIABLE * regu_var, val_descr *
     case T_SLEEP:
     case T_CRC32:
     case T_CONV_TZ:
+    case T_ESTIMATED_TABLE_ROWS:
+    case T_ESTIMATED_AVG_ROW_LENGTH:
+    case T_ESTIMATED_DATA_LENGTH:
+    case T_ESTIMATED_DATA_FREE:
+    case T_COLLECTION_TO_STRING:
       /* fetch rhs value */
       if (fetch_peek_dbval (thread_p, arithptr->rightptr, vd, NULL, obj_oid, tpl, &peek_right) != NO_ERROR)
 	{
@@ -1385,6 +1392,17 @@ fetch_peek_arith (THREAD_ENTRY * thread_p, REGU_VARIABLE * regu_var, val_descr *
 	  PRIM_SET_NULL (arithptr->value);
 	}
       else if (db_string_md5 (peek_right, arithptr->value) != NO_ERROR)
+	{
+	  goto error;
+	}
+      break;
+
+    case T_UUID_FORMAT:
+      if (DB_IS_NULL (peek_right))
+	{
+	  PRIM_SET_NULL (arithptr->value);
+	}
+      else if (db_uuid_format (peek_right, arithptr->value) != NO_ERROR)
 	{
 	  goto error;
 	}
@@ -3512,10 +3530,56 @@ fetch_peek_arith (THREAD_ENTRY * thread_p, REGU_VARIABLE * regu_var, val_descr *
       /* sys_guid() is not constant */
       REGU_VARIABLE_SET_FLAG (regu_var, REGU_VARIABLE_FETCH_NOT_CONST);
       assert (!REGU_VARIABLE_IS_FLAGED (regu_var, REGU_VARIABLE_FETCH_ALL_CONST));
-      if (db_guid (thread_p, arithptr->value) != NO_ERROR)
+      if (db_uuidv4 (arithptr->value) != NO_ERROR)
 	{
 	  goto error;
 	}
+      break;
+
+    case T_UUID:
+      {
+	REGU_VARIABLE_SET_FLAG (regu_var, REGU_VARIABLE_FETCH_NOT_CONST);
+	assert (!REGU_VARIABLE_IS_FLAGED (regu_var, REGU_VARIABLE_FETCH_ALL_CONST));
+	int version;
+	if (DB_IS_NULL (peek_right))
+	  {
+	    /* NULL version argument is not allowed; UUID() with no argument arrives as the constant 4 */
+	    version = -1;
+	  }
+	else
+	  {
+	    version = db_get_int (peek_right);
+	  }
+
+	if (version == 0 || version == 4)
+	  {
+	    if (db_uuid_bin (UUID_V4, NULL, 0, arithptr->value) != NO_ERROR)
+	      {
+		goto error;
+	      }
+	  }
+	else if (version == 7)
+	  {
+	    UUID_STATE uuid_state;
+	    uuid_state.last_ms = &thread_p->uuidv7_last_ms;
+	    uuid_state.seq = &thread_p->uuidv7_seq;
+
+	    if (db_uuid_bin
+		(UUID_V7, &uuid_state,
+		 ((uint64_t) vd->sys_epochtime * 1000ULL) + (uint64_t) (vd->sys_datetime.time % 1000),
+		 arithptr->value) != NO_ERROR)
+	      {
+		goto error;
+	      }
+	  }
+	else
+	  {
+	    if (db_uuid_bin (UUID_UNSUPPORTED, NULL, 0, arithptr->value) != NO_ERROR)
+	      {
+		goto error;
+	      }
+	  }
+      }
       break;
 
     case T_TYPEOF:
@@ -3735,6 +3799,23 @@ fetch_peek_arith (THREAD_ENTRY * thread_p, REGU_VARIABLE * regu_var, val_descr *
 	}
       break;
 
+    case T_ESTIMATED_TABLE_ROWS:
+    case T_ESTIMATED_AVG_ROW_LENGTH:
+    case T_ESTIMATED_DATA_LENGTH:
+    case T_ESTIMATED_DATA_FREE:
+      if (qdata_get_estimated_heap_stat (thread_p, peek_right, arithptr->value, arithptr->opcode) != NO_ERROR)
+	{
+	  goto error;
+	}
+      break;
+
+    case T_COLLECTION_TO_STRING:
+      if (db_collection_to_string_dbval (arithptr->value, peek_right) != NO_ERROR)
+	{
+	  goto error;
+	}
+      break;
+
     default:
       break;
     }
@@ -3852,6 +3933,8 @@ fetch_peek_arith_end:
     case T_DRANDOM:
       /* sys_guid() is not constant */
     case T_SYS_GUID:
+      /* uuid() is not constant */
+    case T_UUID:
       /* sleep() is not constant */
     case T_SLEEP:
 
@@ -3887,7 +3970,8 @@ error:
 }
 
 /*
- * fetch_peek_dbval () - returns a POINTER to an existing db_value
+ * fetch_peek_dbval_slow () - full fetch path for every regu_var type; the hot cached-attribute case is
+ *                            served by the inline fetch_peek_dbval () wrapper in fetch.h.
  *   return: NO_ERROR or ER_code
  *   regu_var(in/out): Regulator Variable
  *   vd(in): Value Descriptor
@@ -3898,8 +3982,8 @@ error:
  *
  */
 int
-fetch_peek_dbval (THREAD_ENTRY * thread_p, REGU_VARIABLE * regu_var, val_descr * vd, OID * class_oid, OID * obj_oid,
-		  QFILE_TUPLE tpl, DB_VALUE ** peek_dbval)
+fetch_peek_dbval_slow (THREAD_ENTRY * thread_p, REGU_VARIABLE * regu_var, val_descr * vd, OID * class_oid,
+		       OID * obj_oid, QFILE_TUPLE tpl, DB_VALUE ** peek_dbval)
 {
   int length;
   const PR_TYPE *pr_type;
@@ -4500,6 +4584,19 @@ fetch_peek_dbval (THREAD_ENTRY * thread_p, REGU_VARIABLE * regu_var, val_descr *
   assert (REGU_VARIABLE_IS_FLAGED (regu_var, REGU_VARIABLE_FETCH_ALL_CONST)
 	  || REGU_VARIABLE_IS_FLAGED (regu_var, REGU_VARIABLE_FETCH_NOT_CONST));
 
+  /* flag a stable regu_var (cached attr/literal/pos/const) so inline fetch_peek_dbval () peeks it directly */
+  if ((((regu_var->type == TYPE_ATTR_ID || regu_var->type == TYPE_SHARED_ATTR_ID
+	 || regu_var->type == TYPE_CLASS_ATTR_ID) && regu_var->value.attr_descr.cache_dbvalp != NULL)
+       || regu_var->type == TYPE_DBVAL || regu_var->type == TYPE_POS_VALUE
+       || (regu_var->type == TYPE_CONSTANT && regu_var->xasl == NULL && regu_var->value.dbvalptr != NULL))
+      && !REGU_VARIABLE_IS_FLAGED (regu_var, REGU_VARIABLE_APPLY_COLLATION)
+      && regu_var->domain != NULL
+      && TP_DOMAIN_TYPE (regu_var->domain) != DB_TYPE_VARIABLE
+      && TP_DOMAIN_COLLATION_FLAG (regu_var->domain) == TP_DOMAIN_COLL_NORMAL)
+    {
+      REGU_VARIABLE_SET_FLAG (regu_var, REGU_VARIABLE_FAST_PEEK);
+    }
+
   return NO_ERROR;
 
 exit_on_error:
@@ -5085,3 +5182,121 @@ fetch_force_not_const_recursive (REGU_VARIABLE & reguvar)
   reguvar.map_regu (map_func);
 }
 // *INDENT-ON*
+
+/*
+ * fetch_peek_leftmost_numeric_regu () - Recursively search leftptr of an arith tree for the first NUMERIC-typed node.
+ *
+ *   return       : peeked DB_VALUE of the NUMERIC node, or NULL if not found
+ *   thread_p(in) : thread entry
+ *   regu_var(in) : root of the regu variable arith tree to search
+ *   vd(in)       : value descriptor
+ */
+DB_VALUE *
+fetch_peek_leftmost_numeric_regu (THREAD_ENTRY * thread_p, REGU_VARIABLE * regu_var, VAL_DESCR * vd)
+{
+  ARITH_TYPE *arithptr;
+  DB_VALUE *dbvalp;
+
+  if (regu_var == NULL)
+    {
+      return NULL;
+    }
+
+  if (TP_DOMAIN_TYPE (regu_var->domain) == DB_TYPE_NUMERIC)
+    {
+      dbvalp = NULL;
+      if (fetch_peek_dbval (thread_p, regu_var, vd, NULL, NULL, NULL, &dbvalp) == NO_ERROR
+	  && dbvalp != NULL && DB_VALUE_DOMAIN_TYPE (dbvalp) == DB_TYPE_NUMERIC)
+	{
+	  return dbvalp;
+	}
+      return NULL;
+    }
+
+  if (regu_var->type == TYPE_INARITH || regu_var->type == TYPE_OUTARITH)
+    {
+      arithptr = regu_var->value.arithptr;
+      return fetch_peek_leftmost_numeric_regu (thread_p, arithptr->leftptr, vd);
+    }
+
+  return NULL;
+}
+
+/*
+ * fetch_and_coerce_key_limit_lower () - fetch regu variable and coerce to BIGINT,
+ *                                       handling NUMERIC-to-BIGINT overflow for a lower key limit.
+ *
+ *   return          : NO_ERROR or error code
+ *   thread_p (in)   : thread entry
+ *   key_limit_l(in) : regu variable for lower key limit
+ *   vd (in)         : value descriptor
+ *   out_val (out)   : always set to a valid BIGINT on success;
+ *                     DB_BIGINT_MAX on positive overflow (no rows), 0 on negative overflow (all rows)
+ */
+int
+fetch_and_coerce_key_limit_lower (THREAD_ENTRY * thread_p, REGU_VARIABLE * key_limit_l,
+				  VAL_DESCR * vd, DB_VALUE * out_val)
+{
+  TP_DOMAIN *domainp = tp_domain_resolve_default (DB_TYPE_BIGINT);
+  TP_DOMAIN_STATUS dom_status;
+  DB_VALUE *tmp_dbvalp;
+  int error_code;
+
+  assert (key_limit_l != NULL);
+  assert (vd != NULL);
+  assert (out_val != NULL);
+
+  if (key_limit_l->type == TYPE_INARITH)
+    {
+      error_code = fetch_peek_dbval (thread_p, key_limit_l, vd, NULL, NULL, NULL, &tmp_dbvalp);
+      if (error_code != NO_ERROR)
+	{
+	  if (er_errid () != ER_IT_DATA_OVERFLOW && er_errid () != ER_QPROC_OVERFLOW_SUBTRACTION)
+	    {
+	      return ER_FAILED;
+	    }
+
+	  /* NUMERIC -> BIGINT overflow during arithmetic: find the NUMERIC operand and check its sign */
+	  tmp_dbvalp = fetch_peek_leftmost_numeric_regu (thread_p, key_limit_l, vd);
+	  if (tmp_dbvalp == NULL)
+	    {
+	      return ER_FAILED;
+	    }
+
+	  /* positive overflow: no rows match (DB_BIGINT_MAX); negative overflow: all rows match (0) */
+	  db_make_bigint (out_val, DB_VALUE_NUMERIC_IS_VALUE_NEGATIVE (tmp_dbvalp) ? 0 : DB_BIGINT_MAX);
+	  er_clear ();
+	  return NO_ERROR;
+	}
+    }
+  else
+    {
+      if (fetch_peek_dbval (thread_p, key_limit_l, vd, NULL, NULL, NULL, &tmp_dbvalp) != NO_ERROR)
+	{
+	  return ER_FAILED;
+	}
+    }
+
+  /* coerce fetched value to BIGINT */
+  dom_status = tp_value_coerce (tmp_dbvalp, out_val, domainp);
+  if (dom_status != DOMAIN_COMPATIBLE)
+    {
+      if (dom_status == DOMAIN_OVERFLOW && DB_VALUE_DOMAIN_TYPE (tmp_dbvalp) == DB_TYPE_NUMERIC)
+	{
+	  /* positive overflow: no rows match (DB_BIGINT_MAX); negative overflow: all rows match (0) */
+	  db_make_bigint (out_val, DB_VALUE_NUMERIC_IS_VALUE_NEGATIVE (tmp_dbvalp) ? 0 : DB_BIGINT_MAX);
+	  er_clear ();
+	  return NO_ERROR;
+	}
+      (void) tp_domain_status_er_set (dom_status, ARG_FILE_LINE, tmp_dbvalp, domainp);
+      return ER_FAILED;
+    }
+
+  if (DB_VALUE_DOMAIN_TYPE (out_val) != DB_TYPE_BIGINT)
+    {
+      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_QPROC_INVALID_DATATYPE, 0);
+      return ER_FAILED;
+    }
+
+  return NO_ERROR;
+}

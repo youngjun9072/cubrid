@@ -154,7 +154,7 @@ static const DB_TYPE db_type_rank[] = { DB_TYPE_NULL,
 };
 static int db_type_rank_order[DB_TYPE_LAST + 1] = { 0, };
 
-AREA *tp_Domain_area = NULL;
+static AREA *tp_Domain_area = NULL;
 static bool tp_Initialized = false;
 
 extern unsigned int db_on_server;
@@ -552,13 +552,13 @@ TP_DOMAIN **tp_Domain_conversion_matrix[] = {
   NULL				/* DB_TYPE_JSON */
 };
 
-#if defined (SERVER_MODE)
+#if defined (SERVER_MODE) || (defined(CS_MODE) && defined(MULTI_CONN_TO_A_SERVER))
 /* lock for domain list cache */
 static pthread_mutex_t tp_domain_cache_lock = PTHREAD_MUTEX_INITIALIZER;
 #endif /* SERVER_MODE */
 
 
-#ifdef __cplusplus
+/* *INDENT-OFF* */
 /* Notice)
  * The constructor of this class is used solely to initialize global variable(db_type_rank_order).
  */
@@ -575,18 +575,7 @@ public:
   }
 };
 static volatile class type_rank_order_initializer tro_instance;
-#else
-__attribute__ ((constructor))
-     static void tp_init_db_type_rank_order (void)
-{
-  memset (db_type_rank_order, 0x00, sizeof (db_type_rank_order));
-  for (int i = 0; db_type_rank[i] < (DB_TYPE_LAST + 1); i++)
-    {
-      db_type_rank_order[db_type_rank[i]] = i;
-    }
-}
-#endif
-
+/* *INDENT-ON* */
 
 static int tp_domain_size_internal (const TP_DOMAIN * domain);
 static void tp_value_slam_domain (DB_VALUE * value, const DB_DOMAIN * domain);
@@ -2074,6 +2063,13 @@ tp_is_domain_cached (TP_DOMAIN * dlist, TP_DOMAIN * transient, TP_MATCH exact, T
 		    if (dsize1 == 1)
 		      {
 			match = tp_domain_match (domain->setdomain, transient->setdomain, exact);
+
+			if (match && TP_IS_SET_TYPE (TP_DOMAIN_TYPE (transient))
+			    && TP_TYPE_HAS_COLLATION (TP_DOMAIN_TYPE (transient->setdomain))
+			    && domain->setdomain->collation_flag != transient->setdomain->collation_flag)
+			  {
+			    match = 0;
+			  }
 		      }
 		    else
 		      {
@@ -2083,7 +2079,10 @@ tp_is_domain_cached (TP_DOMAIN * dlist, TP_DOMAIN * transient, TP_MATCH exact, T
 			for (d1 = domain->setdomain, d2 = transient->setdomain; d1 != NULL && d2 != NULL;
 			     d1 = d1->next, d2 = d2->next)
 			  {
-			    if (!tp_domain_match (d1, d2, exact))
+			    if (!tp_domain_match (d1, d2, exact)
+				|| (TP_IS_SET_TYPE (TP_DOMAIN_TYPE (transient))
+				    && TP_TYPE_HAS_COLLATION (TP_DOMAIN_TYPE (d2))
+				    && d1->collation_flag != d2->collation_flag))
 			      {
 				match = 0;
 				break;	/* immediately exit for loop */
@@ -2151,7 +2150,12 @@ tp_is_domain_cached (TP_DOMAIN * dlist, TP_DOMAIN * transient, TP_MATCH exact, T
 
 	    if (match)
 	      {
-		break;
+		if (!TP_IS_SET_TYPE (TP_DOMAIN_TYPE (transient)) || domain->is_desc == transient->is_desc)
+		  {
+		    break;
+		  }
+
+		match = 0;
 	      }
 
 	    *ins_pos = domain;
@@ -2411,7 +2415,7 @@ tp_is_domain_cached (TP_DOMAIN * dlist, TP_DOMAIN * transient, TP_MATCH exact, T
     case DB_TYPE_NUMERIC:
       /*
        * The first domain is a default domain for numeric type,
-       * actually NUMERIC(15,0). We try to match it first.
+       * actually NUMERIC(43,0). We try to match it first.
        */
       if (transient->precision == domain->precision && transient->scale == domain->scale
 	  && transient->is_desc == domain->is_desc)
@@ -2906,7 +2910,7 @@ tp_domain_cache (TP_DOMAIN * transient)
 {
   TP_DOMAIN *domain, **dlist;
   TP_DOMAIN *ins_pos = NULL;
-#if defined (SERVER_MODE)
+#if defined (SERVER_MODE) || (defined(CS_MODE) && defined(MULTI_CONN_TO_A_SERVER))
   int rv;
 #endif /* SERVER_MODE */
 
@@ -2952,7 +2956,7 @@ tp_domain_cache (TP_DOMAIN * transient)
   /*
    * second search stage: LOCK
    */
-#if defined (SERVER_MODE)
+#if defined (SERVER_MODE) || (defined(CS_MODE) && defined(MULTI_CONN_TO_A_SERVER))
   rv = pthread_mutex_lock (&tp_domain_cache_lock);	/* LOCK */
 
   /* locate the root of the cache list for domains of this type */
@@ -3002,7 +3006,7 @@ tp_domain_cache (TP_DOMAIN * transient)
 
   domain = transient;
 
-#if defined (SERVER_MODE)
+#if defined (SERVER_MODE) || (defined(CS_MODE) && defined(MULTI_CONN_TO_A_SERVER))
   pthread_mutex_unlock (&tp_domain_cache_lock);
 #endif /* SERVER_MODE */
 
@@ -3332,12 +3336,12 @@ tp_domain_resolve_value (const DB_VALUE * val, TP_DOMAIN * dbuf)
 	   * the default "maximum" precision.
 	   * This may not be necessary any more.
 	   */
-	  if (domain->precision == -1)
+	  if (domain->precision == DB_DEFAULT_PRECISION)
 	    {
 	      domain->precision = DB_DEFAULT_NUMERIC_PRECISION;
 	    }
 
-	  if (domain->scale == -1)
+	  if (domain->scale == DB_DEFAULT_SCALE)
 	    {
 	      domain->scale = DB_DEFAULT_NUMERIC_SCALE;
 	    }
@@ -4571,8 +4575,7 @@ tp_can_steal_string (const DB_VALUE * val, const DB_DOMAIN * desired_domain)
     {
     case DB_TYPE_CHAR:
       return (desired_precision == original_length
-	      && (original_type == DB_TYPE_CHAR || original_type == DB_TYPE_VARCHAR)
-	      && DB_GET_COMPRESSED_STRING (val) == NULL);
+	      && (original_type == DB_TYPE_CHAR || original_type == DB_TYPE_VARCHAR));
     case DB_TYPE_VARCHAR:
       return (desired_precision >= original_length
 	      && (original_type == DB_TYPE_CHAR || original_type == DB_TYPE_VARCHAR));
@@ -11133,7 +11136,14 @@ fprint_domain (FILE * fp, TP_DOMAIN * domain)
 	  break;
 
 	case DB_TYPE_NUMERIC:
-	  fprintf (fp, "%s(%d,%d)", d->type->name, d->precision, d->scale);
+	  if (d->precision == DB_DEFAULT_NUMERIC_PRECISION)
+	    {
+	      fprintf (fp, "%s", d->type->name);
+	    }
+	  else
+	    {
+	      fprintf (fp, "%s(%d,%d)", d->type->name, d->precision, d->scale);
+	    }
 	  break;
 
 	default:
@@ -11524,13 +11534,8 @@ tp_infer_common_domain (TP_DOMAIN * arg1, TP_DOMAIN * arg2)
 	}
       else if (common_type == DB_TYPE_NUMERIC)
 	{
-	  int integral_digits1, integral_digits2;
-
-	  integral_digits1 = arg1_prec - arg1_scale;
-	  integral_digits2 = arg2_prec - arg2_scale;
-	  target_domain->scale = MAX (arg1_scale, arg2_scale);
-	  target_domain->precision = (target_domain->scale + MAX (integral_digits1, integral_digits2));
-	  target_domain->precision = MIN (target_domain->precision, DB_MAX_NUMERIC_PRECISION);
+	  target_domain->precision = DB_DEFAULT_NUMERIC_PRECISION;
+	  target_domain->scale = DB_DEFAULT_NUMERIC_SCALE;
 	}
       else
 	{

@@ -73,7 +73,11 @@
  * checking is enabled.
  * This state can be modifed using obt_enable_unique_checking()
  */
-bool obt_Check_uniques = true;
+#if defined (SA_MODE)
+static bool obt_Check_uniques = true;
+#else
+static const bool obt_Check_uniques = true;
+#endif
 
 /*
  * State variable used when creating object template, to indicate whether enable
@@ -86,7 +90,7 @@ bool obt_Enable_autoincrement = true;
  * to set the first generated AUTO_INCREMENT value as LAST_INSERT_ID.
  * It is only for client-side insertion.
  */
-bool obt_Last_insert_id_generated = false;
+CUB_THREAD_LOCAL_PSR bool obt_Last_insert_id_generated = false;
 
 /*
  *                            OBJECT MANAGER AREAS
@@ -104,8 +108,8 @@ bool obt_Last_insert_id_generated = false;
  *
  */
 
-static AREA *Template_area = NULL;
-static AREA *Assignment_area = NULL;
+static CUB_THREAD_LOCAL AREA *Template_area = NULL;
+static CUB_THREAD_LOCAL AREA *Assignment_area = NULL;
 
 /*
  * obj_Template_traversal
@@ -113,12 +117,12 @@ static AREA *Assignment_area = NULL;
  *
  */
 
-static unsigned int obj_Template_traversal = 0;
+static CUB_THREAD_LOCAL unsigned int obj_Template_traversal = 0;
 /*
  * Must make sure template savepoints have unique names to allow for concurrent
  * or nested updates.  Could be resetting this at db_restart() time.
  */
-static unsigned int template_savepoint_count = 0;
+static CUB_THREAD_LOCAL unsigned int template_savepoint_count = 0;
 
 
 static DB_VALUE *check_att_domain (SM_ATTRIBUTE * att, DB_VALUE * proposed_value);
@@ -126,7 +130,7 @@ static int check_constraints (SM_ATTRIBUTE * att, DB_VALUE * value, unsigned for
 static int quick_validate (SM_VALIDATION * valid, DB_VALUE * value);
 static void cache_validation (SM_VALIDATION * valid, DB_VALUE * value);
 static void begin_template_traversal (void);
-static OBJ_TEMPLATE *make_template (MOP object, MOP classobj);
+static OBJ_TEMPLATE *make_template (MOP object, MOP classobj, bool is_read_only);
 static int validate_template (OBJ_TEMPLATE * temp);
 static OBJ_TEMPASSIGN *obt_make_assignment (OBJ_TEMPLATE * template_ptr, SM_ATTRIBUTE * att);
 static void obt_free_assignment (OBJ_TEMPASSIGN * assign);
@@ -509,8 +513,8 @@ quick_validate (SM_VALIDATION * valid, DB_VALUE * value)
       break;
 
     case DB_TYPE_NUMERIC:
-      if (type == valid->last_type && DB_GET_NUMERIC_PRECISION (value) == valid->last_precision
-	  && DB_GET_NUMERIC_SCALE (value) == valid->last_scale)
+      if (type == valid->last_type && db_value_precision (value) == valid->last_precision
+	  && db_value_scale (value) == valid->last_scale)
 	{
 	  is_valid = 1;
 	}
@@ -737,7 +741,7 @@ begin_template_traversal (void)
  */
 
 static OBJ_TEMPLATE *
-make_template (MOP object, MOP classobj)
+make_template (MOP object, MOP classobj, bool is_read_only)
 {
   OBJ_TEMPLATE *template_ptr;
   AU_FETCHMODE mode;
@@ -771,6 +775,12 @@ make_template (MOP object, MOP classobj)
        */
       mode = AU_FETCH_UPDATE;
       auth = AU_ALTER;
+    }
+
+  if (is_read_only)
+    {
+      mode = AU_FETCH_READ;
+      auth = AU_SELECT;
     }
 
   if (au_fetch_class (classobj, &class_, mode, auth))
@@ -1129,7 +1139,7 @@ populate_auto_increment (OBJ_TEMPLATE * template_ptr)
   int error = NO_ERROR;
   DB_VALUE val;
   DB_DATA_STATUS data_status;
-  char auto_increment_name[AUTO_INCREMENT_SERIAL_NAME_MAX_LENGTH];
+  char auto_increment_name[DB_MAX_IDENTIFIER_LENGTH];
   MOP serial_class_mop = NULL, serial_mop;
   DB_IDENTIFIER serial_obj_id;
   const char *class_name;
@@ -1164,7 +1174,12 @@ populate_auto_increment (OBJ_TEMPLATE * template_ptr)
 	    }
 
 	  /* get original class's serial object */
-	  SET_AUTO_INCREMENT_SERIAL_NAME (auto_increment_name, class_name, att->header.name);
+	  error = set_auto_increment_serial_name (auto_increment_name, class_name, att->header.name);
+	  if (error != NO_ERROR)
+	    {
+	      assert (er_errid () != NO_ERROR);
+	      goto auto_increment_error;
+	    }
 	  serial_mop = do_get_serial_obj_id (&serial_obj_id, serial_class_mop, auto_increment_name);
 	  if (serial_mop == NULL)
 	    {
@@ -1403,7 +1418,7 @@ memory_error:
  */
 
 OBJ_TEMPLATE *
-obt_def_object (MOP class_mop)
+obt_def_object (MOP class_mop, bool is_read_only)
 {
   OBJ_TEMPLATE *template_ptr = NULL;
   int is_class = locator_is_class (class_mop, DB_FETCH_CLREAD_INSTWRITE);
@@ -1418,7 +1433,7 @@ obt_def_object (MOP class_mop)
     }
   else
     {
-      template_ptr = make_template (NULL, class_mop);
+      template_ptr = make_template (NULL, class_mop, is_read_only);
     }
 
   return template_ptr;
@@ -1449,7 +1464,7 @@ obt_edit_object (MOP object)
        * create a class object template, these are only allowed to
        * update class attributes
        */
-      template_ptr = make_template (object, object);
+      template_ptr = make_template (object, object, false);
     }
   else if (!object->is_temp)
     {
@@ -1463,7 +1478,7 @@ obt_edit_object (MOP object)
       class_ = sm_get_class (object);
       if (class_ != NULL)
 	{
-	  template_ptr = make_template (object, class_);
+	  template_ptr = make_template (object, class_, false);
 	}
     }
 
@@ -2784,6 +2799,7 @@ obt_disable_serializable_conflict_checking (OBJ_TEMPLATE * template_ptr)
     }
 }
 
+#if defined (SA_MODE)
 /*
  * obt_enable_unique_checking - This is used by the loader to disable unique
  *                              constraint checking for all templates created.
@@ -2803,6 +2819,7 @@ obt_enable_unique_checking (bool new_state)
   obt_Check_uniques = new_state;
   return (old_state);
 }
+#endif
 
 /*
  * obj_set_force_flush - set force_flush flag of the template

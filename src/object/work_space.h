@@ -471,8 +471,8 @@ extern CUB_THREAD_LOCAL int ws_Error_ignore_count;
 extern void ws_abort_transaction (void);
 
 /* startup, shutdown, reset functions */
-extern int ws_init (void);
-extern void ws_final (void);
+extern int ws_init (bool is_sub);
+extern void ws_final (bool is_sub);
 extern void ws_clear (void);
 extern int ws_area_init (void);
 extern void ws_area_final (void);

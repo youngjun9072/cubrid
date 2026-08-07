@@ -47,7 +47,9 @@
 
 #if defined(SERVER_MODE)
 #define LOCATOR_NKEEP_LIMIT (200)
-#else /* SERVER_MODE */
+#elif defined(CS_MODE) && defined(MULTI_CONN_TO_A_SERVER)
+#define LOCATOR_NKEEP_LIMIT (20)
+#else
 #define LOCATOR_NKEEP_LIMIT (2)
 #endif /* SERVER_MODE */
 

@@ -40,6 +40,7 @@
 #endif /* ! WINDOWS */
 
 #include "authenticate.h"
+#include "dbtype_def.h"
 #include "error_manager.h"
 #include "parser.h"
 #include "parser_message.h"
@@ -1375,6 +1376,28 @@ pt_get_expression_definition (const PT_OP_TYPE op, EXPRESSION_DEFINITION * def)
       def->overloads_count = num;
       break;
 
+    case PT_UUID:
+      num = 0;
+
+      /* first overload: UUID() -> BIT (defaults to UUID(4)) */
+      sig.arg1_type.type = pt_arg_type::NORMAL;
+      sig.arg1_type.val.type = PT_TYPE_NONE;
+      sig.return_type.type = pt_arg_type::NORMAL;
+      sig.return_type.val.type = PT_TYPE_BIT;
+
+      def->overloads[num++] = sig;
+
+      /* second overload: UUID(int) -> BIT */
+      sig.arg1_type.type = pt_arg_type::NORMAL;
+      sig.arg1_type.val.type = PT_TYPE_INTEGER;
+      sig.return_type.type = pt_arg_type::NORMAL;
+      sig.return_type.val.type = PT_TYPE_BIT;
+
+      def->overloads[num++] = sig;
+
+      def->overloads_count = num;
+      break;
+
     case PT_LOCAL_TRANSACTION_ID:
       num = 0;
 
@@ -1859,6 +1882,27 @@ pt_get_expression_definition (const PT_OP_TYPE op, EXPRESSION_DEFINITION * def)
 
       def->overloads_count = num;
       break;
+
+    case PT_UUID_FORMAT:
+      num = 0;
+
+      /* UUID_FORMAT (STRING) */
+      sig.arg1_type.type = pt_arg_type::GENERIC;
+      sig.arg1_type.val.generic_type = PT_GENERIC_TYPE_STRING;
+      sig.return_type.type = pt_arg_type::NORMAL;
+      sig.return_type.val.type = PT_TYPE_VARCHAR;
+      def->overloads[num++] = sig;
+
+      /* UUID_FORMAT (BIT) */
+      sig.arg1_type.type = pt_arg_type::GENERIC;
+      sig.arg1_type.val.generic_type = PT_GENERIC_TYPE_BIT;
+      sig.return_type.type = pt_arg_type::NORMAL;
+      sig.return_type.val.type = PT_TYPE_VARCHAR;
+      def->overloads[num++] = sig;
+
+      def->overloads_count = num;
+      break;
+
     case PT_SHA_ONE:
       num = 0;
 
@@ -2960,6 +3004,23 @@ pt_get_expression_definition (const PT_OP_TYPE op, EXPRESSION_DEFINITION * def)
       sig.arg3_type.val.type = PT_TYPE_INTEGER;
       sig.return_type.type = pt_arg_type::NORMAL;
       sig.return_type.val.type = PT_TYPE_INTEGER;
+      def->overloads[num++] = sig;
+
+      def->overloads_count = num;
+      break;
+
+    case PT_ESTIMATED_TABLE_ROWS:
+    case PT_ESTIMATED_AVG_ROW_LENGTH:
+    case PT_ESTIMATED_DATA_LENGTH:
+    case PT_ESTIMATED_DATA_FREE:
+      num = 0;
+
+      /* one overload */
+
+      sig.arg1_type.type = pt_arg_type::GENERIC;
+      sig.arg1_type.val.generic_type = PT_GENERIC_TYPE_CHAR;
+      sig.return_type.type = pt_arg_type::NORMAL;
+      sig.return_type.val.type = PT_TYPE_BIGINT;
       def->overloads[num++] = sig;
 
       def->overloads_count = num;
@@ -4449,6 +4510,23 @@ pt_get_expression_definition (const PT_OP_TYPE op, EXPRESSION_DEFINITION * def)
       def->overloads_count = num;
       break;
 
+    case PT_COLLECTION_TO_STRING:
+      num = 0;
+
+      /* one overload */
+
+      /* arg1 */
+      sig.arg1_type.type = pt_arg_type::GENERIC;
+      sig.arg1_type.val.generic_type = PT_GENERIC_TYPE_SEQUENCE;
+
+      /* return type */
+      sig.return_type.type = pt_arg_type::NORMAL;
+      sig.return_type.val.type = PT_TYPE_VARCHAR;
+      def->overloads[num++] = sig;
+
+      def->overloads_count = num;
+      break;
+
     default:
       return false;
     }
@@ -4513,28 +4591,8 @@ pt_coerce_expression_argument (PARSER_CONTEXT * parser, PT_NODE * expr, PT_NODE 
       break;
 
     case PT_TYPE_NUMERIC:
-      switch (node->type_enum)
-	{
-	case PT_TYPE_SMALLINT:
-	  precision = DB_SMALLINT_PRECISION;
-	  scale = 0;
-	  break;
-
-	case PT_TYPE_INTEGER:
-	  precision = DB_INTEGER_PRECISION;
-	  scale = 0;
-	  break;
-
-	case PT_TYPE_BIGINT:
-	  precision = DB_BIGINT_PRECISION;
-	  scale = 0;
-	  break;
-
-	default:
-	  precision = DB_DEFAULT_NUMERIC_PRECISION;
-	  scale = DB_DEFAULT_NUMERIC_DIVISION_SCALE;
-	  break;
-	}
+      precision = DB_DEFAULT_NUMERIC_PRECISION;
+      scale = DB_DEFAULT_NUMERIC_SCALE;
       break;
 
     case PT_TYPE_VARCHAR:
@@ -5404,7 +5462,15 @@ pt_coerce_expr_arguments (PARSER_CONTEXT * parser, PT_NODE * expr, PT_NODE * arg
 	  if (PT_IS_NAME_NODE (arg1) && PT_IS_VALUE_NODE (arg2)
 	      && (arg3_type == PT_TYPE_NONE || PT_IS_VALUE_NODE (arg3)) && arg1_type != PT_TYPE_ENUMERATION)
 	    {
-	      arg1_eq_type = arg2_eq_type = arg1_type;
+	      if (arg1_type == PT_TYPE_NA && common_type != PT_TYPE_NULL)
+		{
+		  /* NA column vs constant: use inferred type (e.g. string literal) */
+		  arg1_eq_type = arg2_eq_type = common_type;
+		}
+	      else
+		{
+		  arg1_eq_type = arg2_eq_type = arg1_type;
+		}
 	      if (arg3_type != PT_TYPE_NONE)
 		{
 		  arg3_eq_type = arg1_type;
@@ -5428,7 +5494,14 @@ pt_coerce_expr_arguments (PARSER_CONTEXT * parser, PT_NODE * expr, PT_NODE * arg
 	  else if (PT_IS_NAME_NODE (arg2) && PT_IS_VALUE_NODE (arg1) && arg3_type == PT_TYPE_NONE
 		   && arg2_type != PT_TYPE_ENUMERATION)
 	    {
-	      arg1_eq_type = arg2_eq_type = arg2_type;
+	      if (arg2_type == PT_TYPE_NA && common_type != PT_TYPE_NULL)
+		{
+		  arg1_eq_type = arg2_eq_type = common_type;
+		}
+	      else
+		{
+		  arg1_eq_type = arg2_eq_type = arg2_type;
+		}
 	      if (arg1_type != arg2_type && PT_IS_NUMERIC_TYPE (arg2_type) && arg2_type != PT_TYPE_NUMERIC
 		  && op != PT_EQ && op != PT_EQ_SOME && op != PT_EQ_ALL)
 		{
@@ -5453,6 +5526,16 @@ pt_coerce_expr_arguments (PARSER_CONTEXT * parser, PT_NODE * expr, PT_NODE * arg
 		      arg3_eq_type = arg2_type;
 		    }
 		}
+	    }
+	  else if (arg1_type == PT_TYPE_NA && PT_IS_CHAR_STRING_TYPE (arg2_type)
+		   && PT_IS_NAME_NODE (arg1) && !PT_IS_NAME_NODE (arg2))
+	    {
+	      arg1_eq_type = arg2_eq_type = arg2_type;
+	    }
+	  else if (arg2_type == PT_TYPE_NA && PT_IS_CHAR_STRING_TYPE (arg1_type)
+		   && PT_IS_NAME_NODE (arg2) && !PT_IS_NAME_NODE (arg1))
+	    {
+	      arg1_eq_type = arg2_eq_type = arg1_type;
 	    }
 	}
 
@@ -5756,6 +5839,7 @@ does_op_specially_treat_null_arg (PT_OP_TYPE op)
     case PT_CONCAT:
     case PT_CONCAT_WS:
     case PT_TO_CHAR:
+    case PT_UUID:
       return true;
     case PT_REPLACE:
     case PT_STRCAT:
@@ -5836,6 +5920,13 @@ pt_apply_expressions_definition (PARSER_CONTEXT * parser, PT_NODE ** node)
     {
       expr->type_enum = PT_TYPE_NULL;
       return NO_ERROR;
+    }
+
+  /* UUID does not accept a NULL version argument */
+  if (op == PT_UUID && arg1 != NULL && arg1_type == PT_TYPE_NULL)
+    {
+      PT_ERRORm (parser, expr, MSGCAT_SET_PARSER_SEMANTIC, MSGCAT_SEMANTIC_UUID_INVALID_ARG);
+      return ER_FAILED;
     }
 
   best_match = 0;
@@ -6267,6 +6358,7 @@ pt_is_symmetric_op (const PT_OP_TYPE op)
     case PT_STR_TO_DATE:
     case PT_LIST_DBS:
     case PT_SYS_GUID:
+    case PT_UUID:
     case PT_IF:
     case PT_POWER:
     case PT_BIT_TO_BLOB:
@@ -6280,6 +6372,10 @@ pt_is_symmetric_op (const PT_OP_TYPE op)
     case PT_CLOB_TO_CHAR:
     case PT_TYPEOF:
     case PT_INDEX_CARDINALITY:
+    case PT_ESTIMATED_TABLE_ROWS:
+    case PT_ESTIMATED_AVG_ROW_LENGTH:
+    case PT_ESTIMATED_DATA_LENGTH:
+    case PT_ESTIMATED_DATA_FREE:
     case PT_INCR:
     case PT_DECR:
     case PT_RAND:
@@ -6335,6 +6431,7 @@ pt_is_symmetric_op (const PT_OP_TYPE op)
     case PT_CRC32:
     case PT_SCHEMA_DEF:
     case PT_CONV_TZ:
+    case PT_COLLECTION_TO_STRING:
       return false;
 
     default:
@@ -7609,7 +7706,12 @@ pt_check_not_null_constraint (PARSER_CONTEXT * parser, PT_NODE * from, PT_NODE *
 	{
 	  consp = sm_class_constraints (cls);
 
-	  au_fetch_class (cls, &class_, AU_FETCH_READ, AU_SELECT);
+	  if (au_fetch_class (cls, &class_, AU_FETCH_READ, AU_SELECT) != NO_ERROR)
+	    {
+	      er_clear ();
+	      return false;
+	    }
+
 	  attr = classobj_find_attribute (class_, node->info.name.original, 0);
 	  if (attr == NULL)
 	    {
@@ -7763,10 +7865,9 @@ pt_eval_type (PARSER_CONTEXT * parser, PT_NODE * node, void *arg, int *continue_
       if (node->info.method_call.method_type == PT_SP_FUNCTION
 	  && !PT_EXPR_INFO_IS_FLAGED (node, PT_EXPR_INFO_SP_NUMERIC) && node->type_enum == PT_TYPE_NUMERIC)
 	{
-	  int *numeric = prm_get_integer_list_value (PRM_ID_STORED_PROCEDURE_RETURN_NUMERIC_SIZE);
-
-	  PT_EXPR_INFO_SET_FLAG (node, PT_EXPR_INFO_SP_NUMERIC);
-	  node = pt_wrap_with_cast_op (parser, node, PT_TYPE_NUMERIC, numeric[PRM_PRECISION], numeric[PRM_SCALE], NULL);
+	  node =
+	    pt_wrap_with_cast_op (parser, node, PT_TYPE_NUMERIC, DB_DEFAULT_NUMERIC_PRECISION, DB_DEFAULT_NUMERIC_SCALE,
+				  NULL);
 	  if (node == NULL)
 	    {
 	      assert (false);
@@ -8626,6 +8727,7 @@ pt_is_able_to_determine_return_type (const PT_OP_TYPE op)
     case PT_CRC32:
     case PT_DISK_SIZE:
     case PT_SCHEMA_DEF:
+    case PT_COLLECTION_TO_STRING:
       return true;
 
     default:
@@ -9093,6 +9195,38 @@ pt_eval_expr_type (PARSER_CONTEXT * parser, PT_NODE * node)
 	    goto error;
 	  }
       }
+      break;
+
+    case PT_COLLECTION_TO_STRING:
+      if (arg1_type != PT_TYPE_NULL && arg1_type != PT_TYPE_MAYBE && !PT_IS_COLLECTION_TYPE (arg1_type))
+	{
+	  PT_ERRORmf2 (parser, arg1, MSGCAT_SET_PARSER_SEMANTIC, MSGCAT_SEMANTIC_CANT_COERCE_TO,
+		       pt_short_print (parser, arg1), "collection type");
+	  node->type_enum = PT_TYPE_NONE;
+	  goto error;
+	}
+      break;
+
+    case PT_INDEX_CARDINALITY:
+    case PT_ESTIMATED_TABLE_ROWS:
+    case PT_ESTIMATED_AVG_ROW_LENGTH:
+    case PT_ESTIMATED_DATA_LENGTH:
+    case PT_ESTIMATED_DATA_FREE:
+      if (PT_IS_VALUE_NODE (arg1) && PT_IS_CHAR_STRING_TYPE (arg1->type_enum)
+	  && arg1->info.value.data_value.str != NULL && arg1->info.value.data_value.str->length < DB_MAX_CLASS_LENGTH)
+	{
+	  const char *name = (const char *) PT_VALUE_GET_BYTES (arg1);
+	  char realname[DB_MAX_IDENTIFIER_LENGTH];
+
+	  if (strchr (name, '.') == NULL && sm_user_specified_name (name, realname, DB_MAX_IDENTIFIER_LENGTH) != NULL)
+	    {
+	      arg1->info.value.data_value.str = pt_append_bytes (parser, NULL, realname, strlen (realname));
+	      /* text and db_value still hold the old name; clear so both are refreshed from the qualified one */
+	      arg1->info.value.text = NULL;
+	      arg1->info.value.db_value_is_initialized = false;
+	      (void) pt_value_to_db (parser, arg1);
+	    }
+	}
       break;
 
     default:
@@ -11363,7 +11497,8 @@ pt_upd_domain_info (PARSER_CONTEXT * parser, PT_NODE * arg1, PT_NODE * arg2, PT_
       || op == PT_BITSHIFT_RIGHT || op == PT_DIV || op == PT_MOD || op == PT_IF || op == PT_IFNULL || op == PT_CONCAT
       || op == PT_CONCAT_WS || op == PT_FIELD || op == PT_UNIX_TIMESTAMP || op == PT_BIT_COUNT || op == PT_REPEAT
       || op == PT_SPACE || op == PT_MD5 || op == PT_TIMEF || op == PT_AES_ENCRYPT || op == PT_AES_DECRYPT
-      || op == PT_SHA_TWO || op == PT_SHA_ONE || op == PT_TO_BASE64 || op == PT_FROM_BASE64 || op == PT_DEFAULTF)
+      || op == PT_SHA_TWO || op == PT_SHA_ONE || op == PT_TO_BASE64 || op == PT_FROM_BASE64 || op == PT_DEFAULTF
+      || op == PT_NEXT_VALUE || op == PT_CURRENT_VALUE || op == PT_UUID_FORMAT)
     {
       dt = parser_new_node (parser, PT_DATA_TYPE);
       if (dt == NULL)
@@ -11392,13 +11527,8 @@ pt_upd_domain_info (PARSER_CONTEXT * parser, PT_NODE * arg1, PT_NODE * arg2, PT_
 	}
       else if (common_type == PT_TYPE_NUMERIC)
 	{
-	  int integral_digits1, integral_digits2;
-
-	  integral_digits1 = arg1_prec - arg1_dec_prec;
-	  integral_digits2 = arg2_prec - arg2_dec_prec;
-	  dt->info.data_type.dec_precision = MAX (arg1_dec_prec, arg2_dec_prec);
-	  dt->info.data_type.precision =
-	    (dt->info.data_type.dec_precision + MAX (integral_digits1, integral_digits2) + 1);
+	  dt->info.data_type.precision = DB_DEFAULT_NUMERIC_PRECISION;
+	  dt->info.data_type.dec_precision = DB_DEFAULT_NUMERIC_SCALE;
 	  dt->info.data_type.units = 0;
 	}
       else
@@ -11505,8 +11635,8 @@ pt_upd_domain_info (PARSER_CONTEXT * parser, PT_NODE * arg1, PT_NODE * arg2, PT_
 	    }
 	  else
 	    {
-	      dt->info.data_type.precision = arg1_prec + arg2_prec + 1;
-	      dt->info.data_type.dec_precision = (arg1_dec_prec + arg2_dec_prec);
+	      dt->info.data_type.precision = DB_DEFAULT_NUMERIC_PRECISION;
+	      dt->info.data_type.dec_precision = DB_DEFAULT_NUMERIC_SCALE;
 	      dt->info.data_type.units = 0;
 	    }
 	}
@@ -11524,37 +11654,9 @@ pt_upd_domain_info (PARSER_CONTEXT * parser, PT_NODE * arg1, PT_NODE * arg2, PT_
 	    }
 	  else
 	    {
-	      int scaleup = 0;
-
-	      if (arg2_dec_prec > 0)
-		{
-		  scaleup = (MAX (arg1_dec_prec, arg2_dec_prec) + arg2_dec_prec - arg1_dec_prec);
-		}
-	      dt->info.data_type.precision = arg1_prec + scaleup;
-	      dt->info.data_type.dec_precision = ((arg1_dec_prec > arg2_dec_prec) ? arg1_dec_prec : arg2_dec_prec);
+	      dt->info.data_type.precision = DB_DEFAULT_NUMERIC_PRECISION;
+	      dt->info.data_type.dec_precision = DB_DEFAULT_NUMERIC_SCALE;
 	      dt->info.data_type.units = 0;
-	      if (!prm_get_bool_value (PRM_ID_COMPAT_NUMERIC_DIVISION_SCALE) && op == PT_DIVIDE)
-		{
-		  if (dt->info.data_type.dec_precision < DB_DEFAULT_NUMERIC_DIVISION_SCALE)
-		    {
-		      int org_prec, org_scale, new_prec, new_scale;
-		      int scale_delta;
-
-		      org_prec = MIN (38, dt->info.data_type.precision);
-		      org_scale = dt->info.data_type.dec_precision;
-		      scale_delta = (DB_DEFAULT_NUMERIC_DIVISION_SCALE - org_scale);
-		      new_scale = org_scale + scale_delta;
-		      new_prec = org_prec + scale_delta;
-		      if (new_prec > DB_MAX_NUMERIC_PRECISION)
-			{
-			  new_scale -= (new_prec - DB_MAX_NUMERIC_PRECISION);
-			  new_prec = DB_MAX_NUMERIC_PRECISION;
-			}
-
-		      dt->info.data_type.precision = new_prec;
-		      dt->info.data_type.dec_precision = new_scale;
-		    }
-		}
 	    }
 	}
       break;
@@ -11605,12 +11707,8 @@ pt_upd_domain_info (PARSER_CONTEXT * parser, PT_NODE * arg1, PT_NODE * arg2, PT_
 	}
       else if (common_type == PT_TYPE_NUMERIC)
 	{
-	  int integral_digits1, integral_digits2;
-
-	  integral_digits1 = arg1_prec - arg1_dec_prec;
-	  integral_digits2 = arg2_prec - arg2_dec_prec;
-	  dt->info.data_type.dec_precision = MAX (arg1_dec_prec, arg2_dec_prec);
-	  dt->info.data_type.precision = (MAX (integral_digits1, integral_digits2) + dt->info.data_type.dec_precision);
+	  dt->info.data_type.precision = DB_DEFAULT_NUMERIC_PRECISION;
+	  dt->info.data_type.dec_precision = DB_DEFAULT_NUMERIC_SCALE;
 	  dt->info.data_type.units = 0;
 	}
       else if ((arg1->type_enum != arg2->type_enum) && pt_is_op_with_forced_common_type (op))
@@ -11721,6 +11819,12 @@ pt_upd_domain_info (PARSER_CONTEXT * parser, PT_NODE * arg1, PT_NODE * arg2, PT_
       /* Set a large enough precision so that CUBRID is able to handle GUID like 'B5B2D2FA9633460F820589FFDBD8C309'. */
       dt->info.data_type.precision = 32;
       break;
+    case PT_UUID:
+      assert (dt == NULL);
+      dt = pt_make_prim_data_type (parser, PT_TYPE_VARBIT);
+      /* UUID returns 16 bytes = 128 bits */
+      dt->info.data_type.precision = 128;
+      break;
     case PT_CHR:
       assert (dt != NULL);
       dt->info.data_type.precision = TP_FLOATING_PRECISION_VALUE;
@@ -11753,6 +11857,11 @@ pt_upd_domain_info (PARSER_CONTEXT * parser, PT_NODE * arg1, PT_NODE * arg2, PT_
       dt->info.data_type.precision = 40;
       break;
 
+    case PT_UUID_FORMAT:
+      assert (dt != NULL);
+      dt->info.data_type.precision = 36;
+      break;
+
     case PT_TO_BASE64:
     case PT_FROM_BASE64:
       assert (dt != NULL);
@@ -11761,7 +11870,7 @@ pt_upd_domain_info (PARSER_CONTEXT * parser, PT_NODE * arg1, PT_NODE * arg2, PT_
 
     case PT_LAST_INSERT_ID:
       assert (dt == NULL);
-      /* last insert id returns NUMERIC (38, 0) */
+      /* last insert id returns NUMERIC (40, 0) */
       dt = pt_make_prim_data_type (parser, PT_TYPE_NUMERIC);
       dt->info.data_type.precision = DB_MAX_NUMERIC_PRECISION;
       dt->info.data_type.dec_precision = 0;
@@ -11822,6 +11931,7 @@ pt_upd_domain_info (PARSER_CONTEXT * parser, PT_NODE * arg1, PT_NODE * arg2, PT_
     case PT_SUBSTRING:
     case PT_COERCIBILITY:
     case PT_INDEX_PREFIX:
+    case PT_COLLECTION_TO_STRING:
       assert (dt == NULL);
       dt = pt_make_prim_data_type (parser, node->type_enum);
       dt->info.data_type.precision = TP_FLOATING_PRECISION_VALUE;
@@ -11891,9 +12001,8 @@ pt_upd_domain_info (PARSER_CONTEXT * parser, PT_NODE * arg1, PT_NODE * arg2, PT_
 
     case PT_TO_NUMBER:
       {
-	int prec = 0, scale = 0;
-	pt_to_regu_resolve_domain (&prec, &scale, arg2);
-	dt = pt_make_prim_data_type_fortonum (parser, prec, scale);
+	/* the TO_NUMBER() function processes NUMERIC values, so it is always handled as FLOAT NUMERIC. */
+	dt = pt_make_prim_data_type_fortonum (parser);
 	break;
       }
 
@@ -11924,6 +12033,13 @@ pt_upd_domain_info (PARSER_CONTEXT * parser, PT_NODE * arg1, PT_NODE * arg2, PT_
 
     case PT_DEFAULTF:
       dt = parser_copy_tree_list (parser, arg1->data_type);
+      break;
+
+    case PT_NEXT_VALUE:
+    case PT_CURRENT_VALUE:
+      /* serial value is fixed NUMERIC(38,0); do not promote to float numeric */
+      dt->info.data_type.precision = DB_MAX_FIXED_NUMERIC_PRECISION;
+      dt->info.data_type.dec_precision = DB_DEFAULT_NUMERIC_SCALE;
       break;
 
     default:
@@ -11959,14 +12075,11 @@ pt_upd_domain_info (PARSER_CONTEXT * parser, PT_NODE * arg1, PT_NODE * arg2, PT_
 	  break;
 
 	case PT_TYPE_NUMERIC:
-	  if (dt->info.data_type.dec_precision > DB_MAX_NUMERIC_PRECISION)
+	  if (op != PT_NEXT_VALUE && op != PT_CURRENT_VALUE)
 	    {
-	      dt->info.data_type.dec_precision = (dt->info.data_type.dec_precision
-						  - (dt->info.data_type.precision - DB_MAX_NUMERIC_PRECISION));
+	      dt->info.data_type.precision = DB_DEFAULT_NUMERIC_PRECISION;
+	      dt->info.data_type.dec_precision = DB_DEFAULT_NUMERIC_SCALE;
 	    }
-
-	  dt->info.data_type.precision = ((dt->info.data_type.precision > DB_MAX_NUMERIC_PRECISION)
-					  ? DB_MAX_NUMERIC_PRECISION : dt->info.data_type.precision);
 	  break;
 
 	case PT_TYPE_ENUMERATION:
@@ -12455,6 +12568,7 @@ pt_evaluate_db_value_expr (PARSER_CONTEXT * parser, PT_NODE * expr, PT_OP_TYPE o
   DB_VALUE *width_bucket_arg2 = NULL, *width_bucket_arg3 = NULL;
 
   assert (parser != NULL);
+  assert (domain != NULL);
 
   if (!arg1 || !result)
     {
@@ -13000,13 +13114,21 @@ pt_evaluate_db_value_expr (PARSER_CONTEXT * parser, PT_NODE * expr, PT_OP_TYPE o
 	  break;
 
 	case DB_TYPE_NUMERIC:
-	  if (numeric_db_value_negate (arg1) != NO_ERROR)
-	    {
-	      PT_ERRORc (parser, o1, er_msg ());
-	      return 0;
-	    }
+	  {
+	    bool is_float_numeric = false;
+	    int precision = 0, scale = 0;
+	    db_get_numeric_precision_and_scale (arg1, &precision, &scale, &is_float_numeric);
 
-	  db_make_numeric (result, db_get_numeric (arg1), DB_VALUE_PRECISION (arg1), DB_VALUE_SCALE (arg1));
+	    bool is_value_negative = !arg1->domain.numeric_info.is_value_negative;
+	    if (is_value_negative && numeric_db_value_is_zero (arg1))
+	      {
+		/* Prevent -0; zero is always treated as positive. */
+		is_value_negative = false;
+	      }
+
+	    db_make_numeric (result, db_get_numeric (arg1), precision, scale, DB_NUMERIC_BUF_SIZE, is_value_negative,
+			     is_float_numeric);
+	  }
 	  break;
 
 	case DB_TYPE_MONETARY:
@@ -13833,7 +13955,7 @@ pt_evaluate_db_value_expr (PARSER_CONTEXT * parser, PT_NODE * expr, PT_OP_TYPE o
 	      }
 
 	    case DB_TYPE_NUMERIC:
-	      if (numeric_db_value_add (arg1, arg2, result) != NO_ERROR)
+	      if (float_numeric_db_value_add (arg1, arg2, result) != NO_ERROR)
 		{
 		  PT_ERRORc (parser, o1, er_msg ());
 		  return 0;
@@ -14512,11 +14634,12 @@ pt_evaluate_db_value_expr (PARSER_CONTEXT * parser, PT_NODE * expr, PT_OP_TYPE o
 	      }
 
 	    case DB_TYPE_NUMERIC:
-	      if (numeric_db_value_sub (arg1, arg2, result) != NO_ERROR)
+	      if (float_numeric_db_value_sub (arg1, arg2, result) != NO_ERROR)
 		{
 		  PT_ERRORc (parser, o1, er_msg ());
 		  return 0;
 		}
+
 	      dom_status = tp_value_coerce (result, result, domain);
 	      if (dom_status != DOMAIN_COMPATIBLE)
 		{
@@ -14908,7 +15031,7 @@ pt_evaluate_db_value_expr (PARSER_CONTEXT * parser, PT_NODE * expr, PT_OP_TYPE o
 	      }
 
 	    case DB_TYPE_NUMERIC:
-	      error = numeric_db_value_mul (arg1, arg2, result);
+	      error = float_numeric_db_value_mul (arg1, arg2, result);
 	      if (error == ER_IT_DATA_OVERFLOW)
 		{
 		  goto overflow;
@@ -14918,6 +15041,7 @@ pt_evaluate_db_value_expr (PARSER_CONTEXT * parser, PT_NODE * expr, PT_OP_TYPE o
 		  PT_ERRORc (parser, o1, er_msg ());
 		  return 0;
 		}
+
 	      dom_status = tp_value_coerce (result, result, domain);
 	      if (dom_status != DOMAIN_COMPATIBLE)
 		{
@@ -15012,7 +15136,7 @@ pt_evaluate_db_value_expr (PARSER_CONTEXT * parser, PT_NODE * expr, PT_OP_TYPE o
 	    case DB_TYPE_NUMERIC:
 	      if (!numeric_db_value_is_zero (arg2))
 		{
-		  error = numeric_db_value_div (arg1, arg2, result);
+		  error = float_numeric_db_value_div (arg1, arg2, result);
 		  if (error == ER_IT_DATA_OVERFLOW)
 		    {
 		      goto overflow;
@@ -15804,6 +15928,18 @@ pt_evaluate_db_value_expr (PARSER_CONTEXT * parser, PT_NODE * expr, PT_OP_TYPE o
 
     case PT_MD5:
       error = db_string_md5 (arg1, result);
+      if (error < 0)
+	{
+	  PT_ERRORc (parser, o1, er_msg ());
+	  return 0;
+	}
+      else
+	{
+	  return 1;
+	}
+
+    case PT_UUID_FORMAT:
+      error = db_uuid_format (arg1, result);
       if (error < 0)
 	{
 	  PT_ERRORc (parser, o1, er_msg ());
@@ -17220,11 +17356,68 @@ pt_evaluate_db_value_expr (PARSER_CONTEXT * parser, PT_NODE * expr, PT_OP_TYPE o
 	db_make_null (result);
       break;
 
+    case PT_SYS_GUID:
+      error = db_uuidv4 (result);
+      if (error != NO_ERROR)
+	{
+	  PT_ERRORc (parser, expr, er_msg ());
+	  return 0;
+	}
+      return 1;
+
+    case PT_UUID:
+      {
+	int version = 4;
+	UINT64 epoch_ms = 0;
+	UUID_STATE uuid_state;
+
+	if (o1 != NULL)
+	  {
+	    if (DB_VALUE_TYPE (arg1) == DB_TYPE_NULL)
+	      {
+		/* NULL version argument is not allowed; UUID() with no argument has no arg1 node */
+		PT_ERRORm (parser, expr, MSGCAT_SET_PARSER_SEMANTIC, MSGCAT_SEMANTIC_UUID_INVALID_ARG);
+		return 0;
+	      }
+	    version = db_get_int (arg1);
+	  }
+
+	if (version == 0 || version == 4)
+	  {
+	    error = db_uuid_bin (UUID_V4, NULL, 0, result);
+	  }
+	else if (version == 7)
+	  {
+	    assert (!DB_IS_NULL (&parser->sys_epochtime));
+	    assert (!DB_IS_NULL (&parser->sys_datetime));
+
+	    uuid_state.last_ms = &parser->uuidv7_last_ms;
+	    uuid_state.seq = &parser->uuidv7_seq;
+	    epoch_ms = ((UINT64) (*db_get_timestamp (&parser->sys_epochtime)) * 1000ULL)
+	      + (UINT64) (db_get_datetime (&parser->sys_datetime)->time % 1000);
+	    error = db_uuid_bin (UUID_V7, &uuid_state, epoch_ms, result);
+	  }
+	else
+	  {
+	    error = db_uuid_bin (UUID_UNSUPPORTED, NULL, 0, result);
+	  }
+
+	if (error != NO_ERROR)
+	  {
+	    PT_ERRORc (parser, expr, er_msg ());
+	    return 0;
+	  }
+      }
+      return 1;
+
     case PT_INDEX_CARDINALITY:
+    case PT_ESTIMATED_TABLE_ROWS:
+    case PT_ESTIMATED_AVG_ROW_LENGTH:
+    case PT_ESTIMATED_DATA_LENGTH:
+    case PT_ESTIMATED_DATA_FREE:
       /* constant folding for this expression is never performed : is always resolved on server */
       return 0;
     case PT_LIST_DBS:
-    case PT_SYS_GUID:
     case PT_ASSIGN:
     case PT_LIKE_ESCAPE:
     case PT_BETWEEN_AND:
@@ -17504,6 +17697,15 @@ pt_evaluate_db_value_expr (PARSER_CONTEXT * parser, PT_NODE * expr, PT_OP_TYPE o
 	  return 1;
 	}
 
+    case PT_COLLECTION_TO_STRING:
+      error = db_collection_to_string_dbval (result, arg1);
+      if (error < 0)
+	{
+	  PT_ERRORc (parser, o1, er_msg ());
+	  return 0;
+	}
+      return 1;
+
     default:
       break;
     }
@@ -17708,7 +17910,9 @@ pt_fold_const_expr (PARSER_CONTEXT * parser, PT_NODE * expr, void *arg)
     }
   else if (op == PT_NEXT_VALUE || op == PT_CURRENT_VALUE || op == PT_BIT_TO_BLOB || op == PT_CHAR_TO_BLOB
 	   || op == PT_BLOB_TO_BIT || op == PT_BLOB_LENGTH || op == PT_CHAR_TO_CLOB || op == PT_CLOB_TO_CHAR
-	   || op == PT_CLOB_LENGTH || op == PT_EXEC_STATS || op == PT_TRACE_STATS || op == PT_TZ_OFFSET)
+	   || op == PT_CLOB_LENGTH || op == PT_EXEC_STATS || op == PT_TRACE_STATS || op == PT_TZ_OFFSET
+	   || op == PT_ESTIMATED_TABLE_ROWS || op == PT_ESTIMATED_AVG_ROW_LENGTH
+	   || op == PT_ESTIMATED_DATA_LENGTH || op == PT_ESTIMATED_DATA_FREE)
     {
       goto end;
     }
@@ -19758,7 +19962,7 @@ pt_compare_bounds_to_value (PARSER_CONTEXT * parser, PT_NODE * expr, PT_OP_TYPE 
 	  break;
 
 	case PT_TYPE_NUMERIC:
-	  numeric_coerce_num_to_double (db_locate_numeric (rhs_val), DB_VALUE_SCALE (rhs_val), &dtmp);
+	  numeric_coerce_num_to_double (rhs_val, db_get_numeric_scale (rhs_val, NULL), &dtmp);
 	  if (dtmp > DB_INT16_MAX)
 	    lhs_less = true;
 	  else if (dtmp < DB_INT16_MIN)
@@ -19802,7 +20006,7 @@ pt_compare_bounds_to_value (PARSER_CONTEXT * parser, PT_NODE * expr, PT_OP_TYPE 
 	  break;
 
 	case PT_TYPE_NUMERIC:
-	  numeric_coerce_num_to_double (db_locate_numeric (rhs_val), DB_VALUE_SCALE (rhs_val), &dtmp);
+	  numeric_coerce_num_to_double (rhs_val, db_get_numeric_scale (rhs_val, NULL), &dtmp);
 	  if (dtmp > DB_INT32_MAX)
 	    lhs_less = true;
 	  else if (dtmp < DB_INT32_MIN)
@@ -19837,7 +20041,7 @@ pt_compare_bounds_to_value (PARSER_CONTEXT * parser, PT_NODE * expr, PT_OP_TYPE 
 	    lhs_greater = true;
 	  break;
 	case PT_TYPE_NUMERIC:
-	  numeric_coerce_num_to_double (db_locate_numeric (rhs_val), DB_VALUE_SCALE (rhs_val), &dtmp);
+	  numeric_coerce_num_to_double (rhs_val, db_get_numeric_scale (rhs_val, NULL), &dtmp);
 	  if (dtmp > DB_BIGINT_MAX)
 	    lhs_less = true;
 	  else if (dtmp < DB_BIGINT_MIN)
@@ -19866,7 +20070,7 @@ pt_compare_bounds_to_value (PARSER_CONTEXT * parser, PT_NODE * expr, PT_OP_TYPE 
 	  break;
 
 	case PT_TYPE_NUMERIC:
-	  numeric_coerce_num_to_double (db_locate_numeric (rhs_val), DB_VALUE_SCALE (rhs_val), &dtmp);
+	  numeric_coerce_num_to_double (rhs_val, db_get_numeric_scale (rhs_val, NULL), &dtmp);
 	  if (dtmp > FLT_MAX)
 	    lhs_less = true;
 	  else if (dtmp < -(FLT_MAX))

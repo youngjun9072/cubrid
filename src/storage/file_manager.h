@@ -217,7 +217,7 @@ extern int file_apply_tde_algorithm (THREAD_ENTRY * thread_p, const VFID * vfid,
 extern int file_dealloc (THREAD_ENTRY * thread_p, const VFID * vfid, const VPID * vpid, FILE_TYPE file_type_hint);
 
 extern int file_get_num_user_pages (THREAD_ENTRY * thread_p, const VFID * vfid, int *n_user_pages_out);
-extern int file_get_num_total_user_pages (THREAD_ENTRY * thread_p, OID * class_oid, int *n_user_pages_out);
+extern int file_get_num_total_user_pages (THREAD_ENTRY * thread_p, OID * class_oid, int *n_data_pages_out);
 extern DISK_ISVALID file_check_vpid (THREAD_ENTRY * thread_p, const VFID * vfid, const VPID * vpid_lookup);
 extern int file_get_type (THREAD_ENTRY * thread_p, const VFID * vfid, FILE_TYPE * ftype_out);
 extern int file_is_temp (THREAD_ENTRY * thread_p, const VFID * vfid, bool * is_temp);
@@ -291,5 +291,6 @@ extern void file_rv_dump_extdata_remove (FILE * fp, int length, void *data);
 
 /* partial file scan stuff */
 extern int file_get_all_data_sectors (THREAD_ENTRY * thread_p, const VFID * vfid, FILE_FTAB_COLLECTOR * collector_out);
+extern int file_get_num_data_sectors (THREAD_ENTRY * thread_p, const VFID * vfid, int *n_sectors_out);
 
 #endif /* _FILE_MANAGER_H_ */

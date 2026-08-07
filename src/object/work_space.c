@@ -31,7 +31,6 @@
 
 #include "memory_alloc.h"
 #include "area_alloc.h"
-#include "message_catalog.h"
 #include "memory_hash.h"
 #include "error_manager.h"
 #include "oid.h"
@@ -47,11 +46,9 @@
 #include "object_primitive.h"
 #include "object_representation.h"
 #include "class_object.h"
-#include "environment_variable.h"
 #include "db.h"
 #include "transaction_cl.h"
 #include "object_template.h"
-#include "server_interface.h"
 #include "view_transform.h"
 #include "dbtype.h"
 #include "execute_statement.h"
@@ -2309,7 +2306,7 @@ ws_find_class (const char *name)
  *    initialization phase.
  */
 int
-ws_init (void)
+ws_init (bool is_sub)
 {
   int error_code = NO_ERROR;
   unsigned int i;
@@ -2323,9 +2320,12 @@ ws_init (void)
       return ER_FAILED;
     }
 
-  if (db_create_workspace_heap () == 0)
+  if (!is_sub)
     {
-      return ER_OUT_OF_VIRTUAL_MEMORY;
+      if (db_create_workspace_heap () == 0)
+	{
+	  return ER_OUT_OF_VIRTUAL_MEMORY;
+	}
     }
 
   /*
@@ -2403,7 +2403,10 @@ ws_init (void)
   return NO_ERROR;
 
 error:
-  db_destroy_workspace_heap ();
+  if (!is_sub)
+    {
+      db_destroy_workspace_heap ();
+    }
 
   ws_area_final ();
   pr_area_final ();
@@ -2439,14 +2442,17 @@ error:
  * Note: Must only be called prior to closing the database.
  */
 void
-ws_final (void)
+ws_final (bool is_sub)
 {
   MOP mop, next;
   unsigned int slot;
 
-  dk_deduplicate_key_attribute_finalized ();
+  if (!is_sub)
+    {
+      dk_deduplicate_key_attribute_finalized ();
 
-  tr_final ();
+      tr_final ();
+    }
 
   if (prm_get_bool_value (PRM_ID_WS_MEMORY_REPORT))
     {
@@ -2489,7 +2495,10 @@ ws_final (void)
       free_and_init (ws_Mop_table);
     }
 
-  db_destroy_workspace_heap ();
+  if (!is_sub)
+    {
+      db_destroy_workspace_heap ();
+    }
 
   /* clean up misc globals */
   ws_Mop_table = NULL;

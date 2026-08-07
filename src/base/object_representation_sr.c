@@ -94,6 +94,7 @@ static TP_DOMAIN *or_get_domain_and_cache (char *ptr);
 static void or_get_att_index (char *ptr, BTID * btid);
 static int or_get_default_value (OR_ATTRIBUTE * attr, char *ptr, int length);
 static int or_get_current_default_value (OR_ATTRIBUTE * attr, char *ptr, int length);
+static void or_free_auto_increment (OR_ATTRIBUTE * att);
 static int or_cl_get_prop_nocopy (DB_SEQ * properties, const char *name, DB_VALUE * pvalue);
 static void or_install_btids_foreign_key (const char *fkname, DB_SEQ * fk_seq, OR_INDEX * index);
 static void or_install_btids_foreign_key_ref (DB_SEQ * fk_container, OR_INDEX * index);
@@ -123,6 +124,22 @@ static INLINE int or_mvcc_set_prev_version_lsa (OR_BUF * buf, MVCC_REC_HEADER * 
   __attribute__ ((ALWAYS_INLINE));
 static INLINE int or_mvcc_get_prev_version_lsa (OR_BUF * buf, int mvcc_flags, LOG_LSA * prev_version_lsa)
   __attribute__ ((ALWAYS_INLINE));
+
+/*
+ * or_free_auto_increment () - free server-side cached auto-increment metadata
+ *   return: void
+ *   att(in): attribute representation
+ */
+static void
+or_free_auto_increment (OR_ATTRIBUTE * att)
+{
+  char *serial_name = att->auto_increment.serial_name.exchange (NULL);
+
+  if (serial_name != NULL)
+    {
+      free_and_init (serial_name);
+    }
+}
 
 #if defined (ENABLE_UNUSED_FUNCTION)
 /*
@@ -2500,23 +2517,9 @@ or_get_current_representation (RECDES * record, int do_indexes)
       /* set ptr to the beginning of the fixed attributes */
       ptr = diskatt + OR_VAR_TABLE_SIZE (ORC_ATT_VAR_ATT_COUNT);
 
-      if (OR_GET_INT (ptr + ORC_ATT_FLAG_OFFSET) & SM_ATTFLAG_AUTO_INCREMENT)
-	{
-	  att->is_autoincrement = 1;
-	}
-      else
-	{
-	  att->is_autoincrement = 0;
-	}
-
-      if (OR_GET_INT (ptr + ORC_ATT_FLAG_OFFSET) & SM_ATTFLAG_NON_NULL)
-	{
-	  att->is_notnull = 1;
-	}
-      else
-	{
-	  att->is_notnull = 0;
-	}
+      att->is_autoincrement = (OR_GET_INT (ptr + ORC_ATT_FLAG_OFFSET) & SM_ATTFLAG_AUTO_INCREMENT) ? 1 : 0;
+      att->is_notnull = (OR_GET_INT (ptr + ORC_ATT_FLAG_OFFSET) & SM_ATTFLAG_NON_NULL) ? 1 : 0;
+      att->is_invisible = (OR_GET_INT (ptr + ORC_ATT_FLAG_OFFSET) & SM_ATTFLAG_INVISIBLE_COLUMN) ? 1 : 0;
 
       att->type = (DB_TYPE) OR_GET_INT (ptr + ORC_ATT_TYPE_OFFSET);
       att->id = OR_GET_INT (ptr + ORC_ATT_ID_OFFSET);
@@ -2531,6 +2534,7 @@ or_get_current_representation (RECDES * record, int do_indexes)
       att->classoid = oid;
 
       att->auto_increment.serial_obj = oid_Null_oid;
+      att->auto_increment.serial_name = NULL;
       /* get the btree index id if an index has been assigned */
       or_get_att_index (ptr + ORC_ATT_INDEX_OFFSET, &att->index);
 
@@ -2702,14 +2706,8 @@ or_get_current_representation (RECDES * record, int do_indexes)
       ptr = diskatt + OR_VAR_TABLE_SIZE (ORC_ATT_VAR_ATT_COUNT);
 
       att->is_autoincrement = 0;
-      if (OR_GET_INT (ptr + ORC_ATT_FLAG_OFFSET) & SM_ATTFLAG_NON_NULL)
-	{
-	  att->is_notnull = 1;
-	}
-      else
-	{
-	  att->is_notnull = 0;
-	}
+      att->is_invisible = 0;
+      att->is_notnull = (OR_GET_INT (ptr + ORC_ATT_FLAG_OFFSET) & SM_ATTFLAG_NON_NULL) ? 1 : 0;
 
       att->type = (DB_TYPE) OR_GET_INT (ptr + ORC_ATT_TYPE_OFFSET);
       att->id = OR_GET_INT (ptr + ORC_ATT_ID_OFFSET);
@@ -2789,6 +2787,7 @@ or_get_current_representation (RECDES * record, int do_indexes)
       ptr = diskatt + OR_VAR_TABLE_SIZE (ORC_ATT_VAR_ATT_COUNT);
 
       att->is_autoincrement = 0;
+      att->is_invisible = 0;
       att->is_notnull = 0;
 
       att->type = (DB_TYPE) OR_GET_INT (ptr + ORC_ATT_TYPE_OFFSET);
@@ -2809,7 +2808,7 @@ or_get_current_representation (RECDES * record, int do_indexes)
       /* get the btree index id if an index has been assigned */
       or_get_att_index (ptr + ORC_ATT_INDEX_OFFSET, &att->index);
 
-      /* there won't be any indexes or uniques for shared attrs */
+      /* there won't be any indexes or uniques for class attrs */
       att->n_btids = 0;
       att->btids = NULL;
 
@@ -2870,14 +2869,7 @@ or_get_current_representation (RECDES * record, int do_indexes)
       rep->needs_indexes = 1;
     }
 
-  if (OR_VAR_IS_NULL (record->data, ORC_PARTITION_INDEX))
-    {
-      rep->has_partition_info = 0;
-    }
-  else
-    {
-      rep->has_partition_info = 1;
-    }
+  rep->has_partition_info = (OR_VAR_IS_NULL (record->data, ORC_PARTITION_INDEX)) ? 0 : 1;
 
   return rep;
 
@@ -3677,6 +3669,8 @@ or_free_classrep (OR_CLASSREP * rep)
 	    {
 	      free_and_init (att->btids);
 	    }
+
+	  or_free_auto_increment (att);
 	}
       free_and_init (rep->attributes);
     }
@@ -3955,7 +3949,7 @@ or_get_attr_string (RECDES * record, int attr_id, int attr_index, char **string,
 	}
       else if (len < 0xFFU)
 	{
-	  assert (len != 0);
+	  assert (len != 0 || *(attr + 1) == '\0');
 	  attr += 1;
 	  *string = attr;
 	}

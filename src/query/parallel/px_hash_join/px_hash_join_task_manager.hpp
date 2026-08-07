@@ -29,10 +29,23 @@
 #include <mutex>
 
 #include "error_context.hpp"		/* cuberr::context */
+#include "px_hash_join_spawn_manager.hpp"	/* parallel_query::hash_join::spawn_manager */
 #include "px_worker_manager.hpp"	/* parallel_query::worker_manager */
 #include "storage_common.h"		/* NULL_TRAN_INDEX */
 #include "thread_entry.hpp"		/* cubthread::entry */
 #include "thread_entry_task.hpp"	/* cubthread::entry_task */
+
+/*
+ * Forward Declarations
+ */
+
+struct qmgr_temp_file;
+
+typedef struct qmgr_temp_file QMGR_TEMP_FILE;
+
+/*
+ * Class Definitions
+ */
 
 namespace parallel_query
 {
@@ -108,10 +121,21 @@ namespace parallel_query
 
 	inline ~task_execution_guard ()
 	{
+	  /* Tear down any spawn_manager TLS the task may have obtained via get_spawn_manager().
+	   * Safe no-op when never acquired (NULL-guarded inside). */
+	  spawn_manager::destroy_instance ();
+
 	  m_thread_ref.conn_entry = nullptr;
 	  m_thread_ref.on_trace = false;
 
 	  m_thread_ref.pop_resource_tracks ();
+	}
+
+	/* Lazily obtain the per-worker spawn_manager TLS owned by this guard. Returns nullptr
+	 * on allocation failure (er_errid set). Subsequent calls return the same instance. */
+	inline spawn_manager *get_spawn_manager ()
+	{
+	  return spawn_manager::get_instance (m_thread_ref);
 	}
 
       private:
@@ -132,6 +156,10 @@ namespace parallel_query
 	task_manager &m_task_manager;
 	HASHJOIN_MANAGER *m_manager;
 	const int m_index;
+
+	/* Worker-local sector/page iterator. join_task does not consume it, but keeping it
+	 * in the base avoids splitting the hierarchy just for this single member. */
+	sector_page_iterator m_page_iter;
     };
 
     /*
@@ -148,8 +176,6 @@ namespace parallel_query
       private:
 	HASHJOIN_INPUT_SPLIT_INFO *m_split_info;
 	HASHJOIN_SHARED_SPLIT_INFO *m_shared_info;
-
-	PAGE_PTR get_next_page (cubthread::entry &thread_ref);
     };
 
     /*
@@ -168,6 +194,24 @@ namespace parallel_query
 	HASHJOIN_SHARED_JOIN_INFO *m_shared_info;
 
 	HASHJOIN_CONTEXT *get_next_context ();
+    };
+    /*
+     * probe_task
+     */
+
+    class probe_task: public base_task
+    {
+      public:
+	probe_task (task_manager &task_manager, HASHJOIN_MANAGER *manager,
+		    HASHJOIN_CONTEXT *context, HASHJOIN_SHARED_PROBE_INFO *shared_info, int index);
+	void execute (cubthread::entry &thread_ref) override;
+
+      private:
+	HASHJOIN_CONTEXT *m_context;
+	HASHJOIN_SHARED_PROBE_INFO *m_shared_info;
+
+	void execute_inner (cubthread::entry &thread_ref);
+	void execute_outer (cubthread::entry &thread_ref);
     };
   } /* namespace hash_join */
 } /* namespace parallel_query */

@@ -141,7 +141,7 @@ au_auth_accessor::set_new_auth (DB_OBJECT_TYPE obj_type, MOP au_obj, MOP grantor
 				DB_AUTH auth_type, bool grant_option)
 {
   DB_VALUE value;
-  MOP db_class = nullptr, inst_mop = nullptr;
+  MOP inst_mop = nullptr;
   DB_AUTH type;
   int i;
   int error = NO_ERROR;
@@ -197,8 +197,10 @@ au_auth_accessor::set_new_auth (DB_OBJECT_TYPE obj_type, MOP au_obj, MOP grantor
   db_make_int (&value, (int) grant_option);
   obj_set (m_au_obj, "is_grantable", &value);
 
+  error = (au_obj == nullptr) ? au_set_new_timestamps (m_au_obj) : au_update_timestamps (m_au_obj);
+
   pr_clear_value (&value);
-  return NO_ERROR;
+  return error;
 }
 
 int
@@ -228,7 +230,7 @@ au_auth_accessor::get_new_auth (DB_OBJECT_TYPE obj_type, MOP grantor, MOP user, 
   db_make_null (&grant_value);
 
   /* Disable the checking for internal authorization object access */
-  AU_DISABLE (save);
+  AU_SAVE_AND_DISABLE (save);
 
   switch (obj_type)
     {
@@ -382,7 +384,7 @@ release:
     }
 
 exit:
-  AU_ENABLE (save);
+  AU_RESTORE (save);
 
   db_value_clear (&grant_value);
 
@@ -508,7 +510,7 @@ au_delete_auth_of_dropping_user (MOP user)
   db_make_null (&val);
 
   /* Disable the checking for internal authorization object access */
-  AU_DISABLE (save);
+  AU_SAVE_AND_DISABLE (save);
 
   assert (user != NULL);
 
@@ -556,7 +558,7 @@ release:
 exit:
   pr_clear_value (&val);
 
-  AU_ENABLE (save);
+  AU_RESTORE (save);
 
   return error;
 }
@@ -581,7 +583,7 @@ au_delete_auth_of_dropping_database_object (DB_OBJECT_TYPE obj_type, const char 
   db_make_null (&val);
 
   /* Disable the checking for internal authorization object access */
-  AU_DISABLE (save);
+  AU_SAVE_AND_DISABLE (save);
 
   assert (name != NULL);
 
@@ -643,13 +645,13 @@ release:
 exit:
   pr_clear_value (&val);
 
-  AU_ENABLE (save);
+  AU_RESTORE (save);
 
   return error;
 }
 
 /*
- * au_delete_authorizartion_of_dropping_user - delete a db_authorization record refers to the given user.
+ * au_delete_authorizartion_of_dropping_user - delete a _db_authorization record refers to the given user.
  *   return: error code
  *   user(in): the user name to be dropped
  */
@@ -666,7 +668,7 @@ au_delete_authorizartion_of_dropping_user (MOP user)
   db_make_null (&val);
 
   /* Disable the checking for internal authorization object access */
-  AU_DISABLE (save);
+  AU_SAVE_AND_DISABLE (save);
 
   assert (user != NULL);
 
@@ -714,7 +716,7 @@ release:
 exit:
   pr_clear_value (&val);
 
-  AU_ENABLE (save);
+  AU_RESTORE (save);
 
   return error;
 }
@@ -729,7 +731,7 @@ exit:
 int
 au_object_revoke_all_privileges (DB_OBJECT_TYPE obj_type, MOP grantor_mop, const char *unique_name)
 {
-  int error = NO_ERROR, save, len, i = 0;
+  int error = NO_ERROR, save, i = 0;
   const char *auth_type_char;
   DB_AUTH db_auth = DB_AUTH_NONE;
   MOP grantee_mop = NULL, object_of_mop = NULL;
@@ -756,7 +758,7 @@ au_object_revoke_all_privileges (DB_OBJECT_TYPE obj_type, MOP grantor_mop, const
   db_make_null (&auth_type_value);
 
   /* Disable the checking for internal authorization object access */
-  AU_DISABLE (save);
+  AU_SAVE_AND_DISABLE (save);
 
   switch (obj_type)
     {
@@ -863,7 +865,7 @@ au_object_revoke_all_privileges (DB_OBJECT_TYPE obj_type, MOP grantor_mop, const
 	      goto exit;
 	    }
 
-	  auth_type_char = db_get_char (&auth_type_value, &len);
+	  auth_type_char = db_get_char (&auth_type_value);
 
 	  switch (auth_type_char[0])
 	    {
@@ -927,7 +929,7 @@ exit:
       db_close_session (session);
     }
 
-  AU_ENABLE (save);
+  AU_RESTORE (save);
 
   db_value_clear (&grantee_value);
   db_value_clear (&object_of_value);
@@ -956,7 +958,7 @@ exit:
 int
 au_user_revoke_all_privileges (MOP user_mop)
 {
-  int error = NO_ERROR, save, len;
+  int error = NO_ERROR, save;
   int object_type = 0;
   DB_OBJECT_TYPE obj_type = DB_OBJECT_UNKNOWN;
   const char *auth_type_char;
@@ -982,7 +984,7 @@ au_user_revoke_all_privileges (MOP user_mop)
   db_make_null (&auth_type_value);
 
   /* Disable the checking for internal authorization object access */
-  AU_DISABLE (save);
+  AU_SAVE_AND_DISABLE (save);
 
   session = db_open_buffer_local (sql_query);
   if (session == NULL)
@@ -1097,7 +1099,7 @@ au_user_revoke_all_privileges (MOP user_mop)
 	      goto exit;
 	    }
 
-	  auth_type_char = db_get_char (&auth_type_value, &len);
+	  auth_type_char = db_get_char (&auth_type_value);
 
 	  switch (auth_type_char[0])
 	    {
@@ -1161,7 +1163,7 @@ exit:
       db_close_session (session);
     }
 
-  AU_ENABLE (save);
+  AU_RESTORE (save);
 
   db_value_clear (&grantee_value);
   db_value_clear (&object_type_value);
@@ -1201,7 +1203,7 @@ au_object_owner_change_privileges (DB_OBJECT_TYPE obj_type, MOP object_mop, MOP 
 
   assert (old_owner_mop != NULL && new_owner_mop != NULL && unique_name != NULL);
 
-  /* modify db_authorization catalog */
+  /* modify _db_authorization catalog */
   error = update_authorization_for_new_owner (obj_type, old_owner_mop, new_owner_mop, unique_name,
 	  &update_count_db_authorization);
   if (error != NO_ERROR)
@@ -1210,10 +1212,10 @@ au_object_owner_change_privileges (DB_OBJECT_TYPE obj_type, MOP object_mop, MOP 
       goto exit;
     }
 
-  /* if there are no results from querying the db authorization catalog, there is no need to check db_auth. */
+  /* if there are no results from querying the _db_authorization catalog, there is no need to check db_auth. */
   if (update_count_db_authorization)
     {
-      /* modify db_auth catalog */
+      /* modify _db_auth catalog */
       error = update_auth_for_new_owner (obj_type, old_owner_mop, new_owner_mop, unique_name);
       if (error != NO_ERROR)
 	{
@@ -1271,7 +1273,7 @@ update_authorization_for_new_owner (DB_OBJECT_TYPE obj_type, MOP old_owner_mop, 
 
   assert (old_owner_mop != NULL && new_owner_mop != NULL && unique_name != NULL);
 
-  AU_DISABLE (save);
+  AU_SAVE_AND_DISABLE (save);
 
   db_make_null (&val);
   db_make_null (&element);
@@ -1395,7 +1397,7 @@ update_authorization_for_new_owner (DB_OBJECT_TYPE obj_type, MOP old_owner_mop, 
 		   * grantee_mop : grantee_user
 		   * new_owner_mop : grnator_user
 		   *
-		   * ex) SELECT * FROM db_authorization;
+		   * ex) SELECT * FROM _db_authorization;
 		   *   owner            grants
 		   * ================================
 		   *   grantee         {..,unique_name, grantor, ..}
@@ -1422,7 +1424,7 @@ update_authorization_for_new_owner (DB_OBJECT_TYPE obj_type, MOP old_owner_mop, 
 			}
 		      current_cache = db_get_int (&element);
 
-		      /* before deleting the data in db_authorization, merge the data and temp store it. */
+		      /* before deleting the data in _db_authorization, merge the data and temp store it. */
 		      std::get<0> (key) = ws_is_same_object (grantor_mop, old_owner_mop) ? new_owner_mop : grantor_mop;
 		      std::get<1> (key) = grantee_mop;
 		      std::get<2> (key) = object_of_mop;
@@ -1501,7 +1503,7 @@ exit:
       error = ER_GENERIC_ERROR;
     }
 
-  AU_ENABLE (save);
+  AU_RESTORE (save);
 
   return (error);
 }
@@ -1521,7 +1523,6 @@ update_auth_for_new_owner (DB_OBJECT_TYPE obj_type, MOP old_owner_mop, MOP new_o
   DB_VALUE val, db_auth_object_value, grantor_value, grantee_value, object_of_value, auth_type_value, is_grantable_value;
   MOP db_auth_object_mop = NULL, grantor_mop = NULL, grantee_mop = NULL, object_of_mop = NULL;
   const char *auth_type_char;
-  int len;
   DB_AUTH db_auth = DB_AUTH_NONE;
   int is_grantable = -1;
   MOP auth;
@@ -1532,7 +1533,7 @@ update_auth_for_new_owner (DB_OBJECT_TYPE obj_type, MOP old_owner_mop, MOP new_o
 
   assert (old_owner_mop != NULL && new_owner_mop != NULL && unique_name != NULL);
 
-  AU_DISABLE (save);
+  AU_SAVE_AND_DISABLE (save);
 
   db_make_null (&val);
   db_make_null (&db_auth_object_value);
@@ -1655,7 +1656,7 @@ update_auth_for_new_owner (DB_OBJECT_TYPE obj_type, MOP old_owner_mop, MOP new_o
 	      goto exit;
 	    }
 
-	  auth_type_char = db_get_char (&auth_type_value, &len);
+	  auth_type_char = db_get_char (&auth_type_value);
 
 	  switch (auth_type_char[0])
 	    {
@@ -1721,7 +1722,7 @@ update_auth_for_new_owner (DB_OBJECT_TYPE obj_type, MOP old_owner_mop, MOP new_o
        * grantee_mop : grantee_user
        * new_owner_mop : grnator_user
        *
-       * ex) SELECT * FROM db_authorization;
+       * ex) SELECT * FROM _db_authorization;
        *   owner            grants
        * ================================
        *   grantee         {..,unique_name, grantor, ..}
@@ -1802,7 +1803,7 @@ exit:
       error = ER_GENERIC_ERROR;
     }
 
-  AU_ENABLE (save);
+  AU_RESTORE (save);
 
   return (error);
 }

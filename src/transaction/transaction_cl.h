@@ -59,7 +59,9 @@ extern CUB_THREAD_LOCAL bool tm_Tran_async_ws;
 extern CUB_THREAD_LOCAL int tm_Tran_wait_msecs;
 extern CUB_THREAD_LOCAL int tm_Tran_ID;
 extern CUB_THREAD_LOCAL bool tm_Tran_check_interrupt;
+#if defined(SA_MODE)
 extern bool tm_Use_OID_preflush;
+#endif
 extern CUB_THREAD_LOCAL LOCK tm_Tran_rep_read_lock;
 extern CUB_THREAD_LOCAL LC_FETCH_VERSION_TYPE tm_Tran_read_fetch_instance_version;
 extern CUB_THREAD_LOCAL int tm_Tran_invalidate_snapshot;

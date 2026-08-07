@@ -260,6 +260,13 @@ static UTIL_SERVICE_PROPERTY_T us_Property_map[] = {
 static const char **Argv;
 static int ha_mode_in_common;
 
+// TODO: Unless multi-threading is involved, variables may be declared separately for independent operation
+#if 0
+class client_support __gv_client_support_local;
+#undef __gv_cvar
+#define __gv_cvar (__gv_client_support_local)
+#endif
+
 static int util_get_service_option_mask (int util_type);
 static int util_get_command_option_mask (int command_type);
 static void util_service_usage (int util_type);
@@ -2848,7 +2855,7 @@ process_pl_restart (const char *db_name, bool suppress_message)
 	}
     }
 
-  status = sysprm_load_and_init (db_name, NULL, SYSPRM_IGNORE_INTL_PARAMS);
+  status = sysprm_reload_and_init (db_name, NULL);
   const bool is_sp_on = prm_get_bool_value (PRM_ID_STORED_PROCEDURE);
   if (is_sp_on == false)
     {
@@ -2916,7 +2923,7 @@ process_pl_status (const char *db_name)
   int waited_secs = 0;
   UTIL_PL_SERVER_STATUS_E pl_status;
 
-  status = sysprm_load_and_init (db_name, NULL, SYSPRM_IGNORE_INTL_PARAMS);
+  status = sysprm_reload_and_init (db_name, NULL);
   const bool is_sp_on = prm_get_bool_value (PRM_ID_STORED_PROCEDURE);
 
   do

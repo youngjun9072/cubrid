@@ -77,7 +77,7 @@ CUB_THREAD_LOCAL LOCK tm_Tran_rep_read_lock = NULL_LOCK;	/* used in RR transacti
  * must be set before each transaction command.
  */
 CUB_THREAD_LOCAL LC_FETCH_VERSION_TYPE tm_Tran_read_fetch_instance_version = LC_FETCH_MVCC_VERSION;
-CUB_THREAD_LOCAL int tm_Tran_latest_query_status;
+static CUB_THREAD_LOCAL int tm_Tran_latest_query_status;
 
 /* Timeout(milli seconds) for queries.
  *
@@ -89,8 +89,16 @@ CUB_THREAD_LOCAL int tm_Tran_latest_query_status;
  *
  * tm_libcas_depth indicates the depth of callback_xxx functions called by method_callback (SP)
  */
-static CUB_THREAD_LOCAL UINT64 tm_Query_begin = 0;
-static CUB_THREAD_LOCAL int tm_Query_timeout = 0;
+typedef struct
+{
+  UINT64 begin;
+  int timeout;
+} QUERY_TIMEOUT_INFO;
+
+// TODO: FIX-ME: fix me for call method 
+// When the method is called, the task must be executed by the same existing thread.
+static CUB_THREAD_LOCAL QUERY_TIMEOUT_INFO tm_Query_timeout_info = { 0, 0 };
+
 static CUB_THREAD_LOCAL int tm_libcas_depth = 0;
 
 /* this is a local list of user-defined savepoints.  It may be updated upon
@@ -224,7 +232,9 @@ tran_reset_isolation (TRAN_ISOLATION isolation, bool async_ws)
 }
 
 /* only loaddb changes this setting */
+#if defined(SA_MODE)
 bool tm_Use_OID_preflush = true;
+#endif
 
 int
 tran_flush_to_commit (void)
@@ -236,7 +246,9 @@ tran_flush_to_commit (void)
       return NO_ERROR;
     }
 
+#if defined(SA_MODE)
   if (tm_Use_OID_preflush)
+#endif
     {
       (void) locator_assign_all_permanent_oids ();
     }
@@ -1291,8 +1303,8 @@ tran_current_timemillis (void)
 void
 tran_set_query_timeout (int query_timeout)
 {
-  tm_Query_begin = tran_current_timemillis ();
-  tm_Query_timeout = query_timeout;
+  tm_Query_timeout_info.begin = tran_current_timemillis ();
+  tm_Query_timeout_info.timeout = query_timeout;
 }
 
 /*
@@ -1305,13 +1317,13 @@ tran_get_query_timeout (void)
   UINT64 elapsed;
   int timeout;
 
-  if (tm_Query_timeout <= 0)
+  if (tm_Query_timeout_info.timeout <= 0)
     {
       return 0;
     }
 
-  elapsed = tran_current_timemillis () - tm_Query_begin;
-  timeout = (int) (tm_Query_timeout - elapsed);
+  elapsed = tran_current_timemillis () - tm_Query_timeout_info.begin;
+  timeout = (int) (tm_Query_timeout_info.timeout - elapsed);
   if (timeout <= 0)
     {
       /* already expired */

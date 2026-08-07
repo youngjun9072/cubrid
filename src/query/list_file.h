@@ -33,7 +33,9 @@
 #include "dbtype_def.h"
 #include "external_sort.h"
 #if defined (SERVER_MODE)
+#include "file_manager.h"
 #include "log_comm.h"		// for TRAN_ISOLATION; todo - remove it.
+#include <vector>
 #endif // SERVER_MODE
 #include "query_list.h"
 #include "storage_common.h"
@@ -114,6 +116,26 @@ typedef enum
   QFILE_SKIP_DEPENDENT = 1,
   QFILE_MOVE_DEPENDENT = 2
 } QFILE_DEPENDENT_MODE;
+
+#if defined (SERVER_MODE)
+struct sort_px_list_state
+{
+  /* shared sector scan — owned by sort_param->px_sector_scan, freed after all workers finish */
+  QFILE_LIST_SECTOR_SCAN_INFO *sector_scan;
+  /* per-worker page iterator — encapsulates membuf CAS + atomic sector steal */
+  sector_page_iterator page_iter;
+  /* current active page — set when we land on a page, cleared after all tuples are consumed */
+  PAGE_PTR curr_page;
+  struct qmgr_temp_file *curr_tfile;	/* tfile for curr_page (membuf_tfile or disk tfile) */
+  VPID curr_vpid;		/* VPID of curr_page (used for sort key pageid/volid) */
+  int curr_tplno;		/* tuple index within curr_page */
+  int curr_offset;		/* byte offset of current tuple in curr_page */
+  QFILE_TUPLE_RECORD tplrec;	/* buffer for assembling overflow tuples */
+};
+
+extern SORT_STATUS qfile_sort_get_next_parallel (THREAD_ENTRY * thread_p, RECDES * recdes_p, void *arg);
+extern void qfile_sort_px_state_free (THREAD_ENTRY * thread_p, sort_px_list_state * state);
+#endif /* SERVER_MODE */
 
 /* List manipulation routines */
 extern int qfile_initialize (void);
@@ -211,8 +233,10 @@ extern void qfile_print_list (THREAD_ENTRY * thread_p, QFILE_LIST_ID * list_id);
 extern void qfile_print_tuple (QFILE_TUPLE_VALUE_TYPE_LIST * type_list, QFILE_TUPLE tpl);
 #endif
 extern QFILE_LIST_ID *qfile_duplicate_list (THREAD_ENTRY * thread_p, QFILE_LIST_ID * list_id, int flag);
-extern int qfile_get_tuple (THREAD_ENTRY * thread_p, PAGE_PTR first_page, QFILE_TUPLE tuplep,
-			    QFILE_TUPLE_RECORD * tplrec, QFILE_LIST_ID * list_idp);
+extern int qfile_get_tuple (THREAD_ENTRY * thread_p, PAGE_PTR first_page_p, QFILE_TUPLE src_tuple,
+			    QFILE_TUPLE_RECORD * dest_tplrec, QFILE_LIST_ID * list_id_p);
+extern int qfile_assemble_overflow_tuple (THREAD_ENTRY * thread_p, PAGE_PTR first_page_p,
+					  QFILE_TUPLE_RECORD * tplrec, struct qmgr_temp_file *tfile_vfid_p);
 extern void qfile_save_current_scan_tuple_position (QFILE_LIST_SCAN_ID * s_id, QFILE_TUPLE_POSITION * ls_tplpos);
 extern SCAN_CODE qfile_jump_scan_tuple_position (THREAD_ENTRY * thread_p, QFILE_LIST_SCAN_ID * s_id,
 						 QFILE_TUPLE_POSITION * ls_tplpos, QFILE_TUPLE_RECORD * tplrec,
@@ -242,5 +266,29 @@ extern void qfile_update_qlist_count (THREAD_ENTRY * thread_p, const QFILE_LIST_
 extern int qfile_get_list_cache_number_of_entries (int ht_no);
 extern bool qfile_has_no_cache_entries ();
 
+/* Sector-based page distribution */
+extern int qfile_collect_list_sector_info (THREAD_ENTRY * thread_p, QFILE_LIST_ID * list_id,
+					   QFILE_LIST_SECTOR_INFO * sector_info);
+extern void qfile_free_list_sector_info (THREAD_ENTRY * thread_p, QFILE_LIST_SECTOR_INFO * sector_info);
+extern int qfile_open_list_sector_scan (THREAD_ENTRY * thread_p, QFILE_LIST_ID * list_id,
+					QFILE_LIST_SECTOR_SCAN_INFO * sector_scan);
+extern void qfile_close_list_sector_scan (THREAD_ENTRY * thread_p, QFILE_LIST_SECTOR_SCAN_INFO * sector_scan);
+
+#ifdef __cplusplus
+/* ctz on bitmap_inout: lowest set bit -> VPID; clears that bit. false = sector drained. */
+static inline bool
+qfile_sector_bitmap_next_vpid (const VSID * vsid, UINT64 * bitmap_inout, VPID * out_vpid)
+{
+  if (*bitmap_inout == 0)
+    {
+      return false;
+    }
+  int bit_pos = __builtin_ctzll (*bitmap_inout);
+  *bitmap_inout &= *bitmap_inout - 1;
+  out_vpid->volid = vsid->volid;
+  out_vpid->pageid = SECTOR_FIRST_PAGEID (vsid->sectid) + bit_pos;
+  return true;
+}
+#endif /* __cplusplus */
 
 #endif /* _LIST_FILE_H_ */

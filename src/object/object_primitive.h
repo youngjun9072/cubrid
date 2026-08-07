@@ -33,6 +33,7 @@
 
 #include "dbtype_def.h"
 #include "object_domain.h"
+#include "db_multi_threads_connections.h"
 #include "porting_inline.hpp"
 
 #include <cassert>
@@ -323,7 +324,9 @@ extern int pr_midxkey_add_prefix (DB_VALUE * result, DB_VALUE * prefix, DB_VALUE
 extern int pr_midxkey_remove_prefix (DB_VALUE * key, int prefix);
 extern int pr_midxkey_common_prefix (DB_VALUE * key1, DB_VALUE * key2);
 
-extern int pr_Inhibit_oid_promotion;
+#if !defined (SERVER_MODE)
+extern CUB_THREAD_LOCAL int pr_Inhibit_oid_promotion;
+#endif
 
 /* Helper function for DB_VALUE printing; caller must free_and_init result. */
 extern char *pr_valstring (const DB_VALUE *);
@@ -402,11 +405,12 @@ STATIC_INLINE int
 pr_midxkey_element_disk_size (char *mem, DB_DOMAIN * domain)
 {
   /*
-   * variable types except VARCHAR and VARBIT
+   * variable types except VARCHAR, VARBIT, CHAR, and NUMERIC
    * cannot be a member of midxkey
    */
-  assert (!(domain->type->variable_p
-	    && !(TP_DOMAIN_TYPE (domain) == DB_TYPE_VARCHAR || TP_DOMAIN_TYPE (domain) == DB_TYPE_VARBIT)));
+  assert (!domain->type->variable_p
+	  || (TP_DOMAIN_TYPE (domain) == DB_TYPE_VARCHAR || TP_DOMAIN_TYPE (domain) == DB_TYPE_VARBIT
+	      || TP_DOMAIN_TYPE (domain) == DB_TYPE_CHAR || TP_DOMAIN_TYPE (domain) == DB_TYPE_NUMERIC));
 
   return domain->type->get_index_size_of_mem (mem, domain);
 }
