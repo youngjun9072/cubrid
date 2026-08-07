@@ -45,6 +45,14 @@
 // XXX: SHOULD BE THE LAST INCLUDE HEADER
 #include "memory_wrapper.hpp"
 
+#if !defined(SERVER_MODE) && !(defined(CS_MODE) && defined(MULTI_CONN_TO_A_SERVER))
+#define pthread_mutex_init(a, b)
+#define pthread_mutex_destroy(a)
+#define pthread_mutex_lock(a)	0
+#define pthread_mutex_unlock(a)
+static int rv;
+#endif /* !SERVER_MODE */
+
 #if defined(SERVER_MODE)
 #define LOCATOR_NKEEP_LIMIT (200)
 #elif defined(CS_MODE) && defined(MULTI_CONN_TO_A_SERVER)
@@ -63,38 +71,44 @@ struct locator_global
   {
     int number;			/* Num of copy areas that has been kept */
     LC_COPYAREA *areas[LOCATOR_NKEEP_LIMIT];	/* Array of free copy areas */
+#if defined (SERVER_MODE)  || (defined(CS_MODE) && defined(MULTI_CONN_TO_A_SERVER))
+    pthread_mutex_t lock;
+#endif				/* SERVER_MODE */
   } copy_areas;
 
   struct locator_global_lockset_areas
   {
     int number;			/* Num of requested areas that has been kept */
     LC_LOCKSET *areas[LOCATOR_NKEEP_LIMIT];	/* Array of free lockset areas */
+#if defined(SERVER_MODE) || (defined(CS_MODE) && defined(MULTI_CONN_TO_A_SERVER))
+    pthread_mutex_t lock;
+#endif				/* SERVER_MODE */
   } lockset_areas;
 
   struct locator_global_lockhint_areas
   {
     int number;			/* Num of lockhinted areas that has been kept */
     LC_LOCKHINT *areas[LOCATOR_NKEEP_LIMIT];	/* Array of free lockhinted */
+#if defined(SERVER_MODE) || (defined(CS_MODE) && defined(MULTI_CONN_TO_A_SERVER))
+    pthread_mutex_t lock;
+#endif				/* SERVER_MODE */
   } lockhint_areas;
 
   struct locator_global_packed_areas
   {
     int number;			/* Num of packed areas that have been kept */
     LC_COPYAREA *areas[LOCATOR_NKEEP_LIMIT];	/* Array of free packed areas */
+#if defined(SERVER_MODE) || (defined(CS_MODE) && defined(MULTI_CONN_TO_A_SERVER))
+    pthread_mutex_t lock;
+#endif				/* SERVER_MODE */
   } packed_areas;
 };
 
-/* Per-thread cache. Each worker (or any caller thread) owns its own slot
- * pool, eliminating contention and double-free races that previously
- * surfaced when SA-mode applylogdb drove N worker threads through a
- * single shared locator_Keep. */
 static LOCATOR_GLOBAL locator_Keep;
 
 static LC_COPYAREA packed_req_area_ptrs[LOCATOR_NKEEP_LIMIT];
 
 static bool locator_Is_initialized = false;
-
-static void locator_ensure_tls_initialized (void);
 
 static char *locator_allocate_packed (int packed_size);
 static char *locator_reallocate_packed (char *packed, int packed_size);
@@ -145,13 +159,14 @@ locator_is_hfid_equal (HFID * hfid1_p, HFID * hfid2_p)
 }
 
 /*
- * locator_ensure_tls_initialized: ensure the current thread's TLS cache is
- * ready. Called lazily from each allocate/free entry so threads that never
- * invoke locator_initialize_areas() (e.g. applier workers created after
- * process startup) still get a valid cache on first use.
+ * locator_initialize_areas: initialize cache areas
+ *
+ * return:  nothing
+ *
+ * NOTE: Initialize all areas.
  */
-static void
-locator_ensure_tls_initialized (void)
+void
+locator_initialize_areas (void)
 {
   int i;
 
@@ -165,6 +180,11 @@ locator_ensure_tls_initialized (void)
   locator_Keep.lockhint_areas.number = 0;
   locator_Keep.packed_areas.number = 0;
 
+  pthread_mutex_init (&locator_Keep.copy_areas.lock, NULL);
+  pthread_mutex_init (&locator_Keep.lockset_areas.lock, NULL);
+  pthread_mutex_init (&locator_Keep.lockhint_areas.lock, NULL);
+  pthread_mutex_init (&locator_Keep.packed_areas.lock, NULL);
+
   for (i = 0; i < LOCATOR_NKEEP_LIMIT; i++)
     {
       locator_Keep.copy_areas.areas[i] = NULL;
@@ -177,43 +197,12 @@ locator_ensure_tls_initialized (void)
 }
 
 /*
- * locator_initialize_areas: initialize cache areas for the current thread
- *
- * return:  nothing
- *
- * NOTE: Initializes the per-thread cache. With TLS storage no cross-thread
- *       synchronization is needed; each thread that calls an allocate/free
- *       entry will also be initialized on demand via
- *       locator_ensure_tls_initialized().
- */
-void
-locator_initialize_areas (void)
-{
-  locator_ensure_tls_initialized ();
-}
-
-/*
- * locator_free_areas: Free cached areas of the calling thread
+ * locator_free_areas: Free cached areas
  *
  * return: nothing
  *
- * NOTE: With TLS storage this releases only the current thread's cache.
- *       Each worker must call it before exit to avoid leaking its slots.
+ * NOTE: Free all areas that has been cached.
  */
-/*
- * locator_get_keep_addr: return the address of the calling thread's locator_Keep
- *   for diagnostic purposes (verify per-worker TLS isolation).
- *
- *   The pointer must be used only for identity / address-comparison logging;
- *   callers must not dereference it.
- */
-void *
-locator_get_keep_addr (void)
-{
-  locator_ensure_tls_initialized ();
-  return (void *) &locator_Keep;
-}
-
 void
 locator_free_areas (void)
 {
@@ -257,6 +246,11 @@ locator_free_areas (void)
   locator_Keep.lockhint_areas.number = 0;
   locator_Keep.packed_areas.number = 0;
 
+  pthread_mutex_destroy (&locator_Keep.copy_areas.lock);
+  pthread_mutex_destroy (&locator_Keep.lockset_areas.lock);
+  pthread_mutex_destroy (&locator_Keep.lockhint_areas.lock);
+  pthread_mutex_destroy (&locator_Keep.packed_areas.lock);
+
   locator_Is_initialized = false;
 }
 
@@ -282,8 +276,11 @@ locator_allocate_packed (int packed_size)
 {
   char *packed_area = NULL;
   int i, tail;
+#if defined (SERVER_MODE)  || (defined(CS_MODE) && defined(MULTI_CONN_TO_A_SERVER))
+  int rv;
+#endif /* SERVER_MODE */
 
-  locator_ensure_tls_initialized ();
+  rv = pthread_mutex_lock (&locator_Keep.packed_areas.lock);
 
   for (i = 0; i < locator_Keep.packed_areas.number; i++)
     {
@@ -309,6 +306,8 @@ locator_allocate_packed (int packed_size)
 	  break;
 	}
     }
+
+  pthread_mutex_unlock (&locator_Keep.packed_areas.lock);
 
   if (packed_area == NULL)
     {
@@ -348,8 +347,11 @@ void
 locator_free_packed (char *packed_area, int packed_size)
 {
   int tail;
+#if defined (SERVER_MODE)  || (defined(CS_MODE) && defined(MULTI_CONN_TO_A_SERVER))
+  int rv;
+#endif /* SERVER_MODE */
 
-  locator_ensure_tls_initialized ();
+  rv = pthread_mutex_lock (&locator_Keep.packed_areas.lock);
 
   if (locator_Keep.packed_areas.number < LOCATOR_NKEEP_LIMIT)
     {
@@ -369,6 +371,8 @@ locator_free_packed (char *packed_area, int packed_size)
     {
       free_and_init (packed_area);
     }
+
+  pthread_mutex_unlock (&locator_Keep.packed_areas.lock);
 }
 
 #if defined (ENABLE_UNUSED_FUNCTION)
@@ -404,6 +408,9 @@ locator_allocate_copy_area_by_length (int min_length)
   LC_COPYAREA *copyarea = NULL;
   int network_pagesize;
   int i;
+#if defined (SERVER_MODE)  || (defined(CS_MODE) && defined(MULTI_CONN_TO_A_SERVER))
+  int rv;
+#endif /* SERVER_MODE */
 
   /*
    * Make the min_length to be multiple of NETWORK_PAGESIZE since the
@@ -418,7 +425,7 @@ locator_allocate_copy_area_by_length (int min_length)
    * Do we have an area of given or larger length cached ?
    */
 
-  locator_ensure_tls_initialized ();
+  rv = pthread_mutex_lock (&locator_Keep.copy_areas.lock);
 
   for (i = 0; i < locator_Keep.copy_areas.number; i++)
     {
@@ -435,6 +442,8 @@ locator_allocate_copy_area_by_length (int min_length)
 	  break;
 	}
     }
+
+  pthread_mutex_unlock (&locator_Keep.copy_areas.lock);
 
   if (copyarea == NULL)
     {
@@ -523,22 +532,29 @@ locator_reallocate_copy_area_by_length (LC_COPYAREA * old_area, int new_length)
 void
 locator_free_copy_area (LC_COPYAREA * copyarea)
 {
+#if defined (SERVER_MODE)  || (defined(CS_MODE) && defined(MULTI_CONN_TO_A_SERVER))
+  int rv;
+#endif /* SERVER_MODE */
+
   if (LOCATOR_CACHED_COPYAREA_SIZE_LIMIT < (size_t) copyarea->length)
     {
       free_and_init (copyarea);
       return;
     }
 
-  locator_ensure_tls_initialized ();
-
+  rv = pthread_mutex_lock (&locator_Keep.copy_areas.lock);
   if (locator_Keep.copy_areas.number < LOCATOR_NKEEP_LIMIT)
     {
       /* Scramble the memory, so that the developer detects invalid references to free'd areas */
       MEM_REGION_SCRAMBLE (copyarea->mem, copyarea->length);
       locator_Keep.copy_areas.areas[locator_Keep.copy_areas.number++] = copyarea;
+
+      pthread_mutex_unlock (&locator_Keep.copy_areas.lock);
     }
   else
     {
+      pthread_mutex_unlock (&locator_Keep.copy_areas.lock);
+
       free_and_init (copyarea);
     }
 }
@@ -966,6 +982,9 @@ locator_allocate_lockset (int max_reqobjs, LOCK reqobj_inst_lock, LOCK reqobj_cl
   LC_LOCKSET *lockset = NULL;	/* Area for requested objects */
   int length;
   int i;
+#if defined (SERVER_MODE)  || (defined(CS_MODE) && defined(MULTI_CONN_TO_A_SERVER))
+  int rv;
+#endif /* SERVER_MODE */
 
   length = (sizeof (*lockset) + (max_reqobjs * (sizeof (*(lockset->classes)) + sizeof (*(lockset->objects)))));
 
@@ -973,7 +992,7 @@ locator_allocate_lockset (int max_reqobjs, LOCK reqobj_inst_lock, LOCK reqobj_cl
    * Do we have an area cached, as big as the one needed ?
    */
 
-  locator_ensure_tls_initialized ();
+  rv = pthread_mutex_lock (&locator_Keep.lockset_areas.lock);
 
   for (i = 0; i < locator_Keep.lockset_areas.number; i++)
     {
@@ -994,6 +1013,7 @@ locator_allocate_lockset (int max_reqobjs, LOCK reqobj_inst_lock, LOCK reqobj_cl
 	  break;
 	}
     }
+  pthread_mutex_unlock (&locator_Keep.lockset_areas.lock);
 
   if (lockset == NULL)
     {
@@ -1144,6 +1164,10 @@ locator_reallocate_lockset (LC_LOCKSET * lockset, int max_reqobjs)
 void
 locator_free_lockset (LC_LOCKSET * lockset)
 {
+#if defined (SERVER_MODE)  || (defined(CS_MODE) && defined(MULTI_CONN_TO_A_SERVER))
+  int rv;
+#endif /* SERVER_MODE */
+
   if (lockset->packed)
     {
       locator_free_packed (lockset->packed, lockset->packed_size);
@@ -1151,7 +1175,7 @@ locator_free_lockset (LC_LOCKSET * lockset)
       lockset->packed_size = 0;
     }
 
-  locator_ensure_tls_initialized ();
+  rv = pthread_mutex_lock (&locator_Keep.lockset_areas.lock);
 
   if (locator_Keep.lockset_areas.number < LOCATOR_NKEEP_LIMIT)
     {
@@ -1167,6 +1191,8 @@ locator_free_lockset (LC_LOCKSET * lockset)
     {
       free_and_init (lockset);
     }
+
+  pthread_mutex_unlock (&locator_Keep.lockset_areas.lock);
 }
 
 #if defined(CUBRID_DEBUG)
@@ -1630,12 +1656,15 @@ locator_allocate_lockhint (int max_classes, bool quit_on_errors)
   LC_LOCKHINT *lockhint = NULL;
   int length;
   int i;
+#if defined (SERVER_MODE)  || (defined(CS_MODE) && defined(MULTI_CONN_TO_A_SERVER))
+  int rv;
+#endif /* SERVER_MODE */
 
   length = sizeof (*lockhint) + (max_classes * sizeof (*(lockhint->classes)));
 
   /* Do we have a lockhint area cached ? */
 
-  locator_ensure_tls_initialized ();
+  rv = pthread_mutex_lock (&locator_Keep.lockhint_areas.lock);
 
   for (i = 0; i < locator_Keep.lockhint_areas.number; i++)
     {
@@ -1656,6 +1685,8 @@ locator_allocate_lockhint (int max_classes, bool quit_on_errors)
 	  break;
 	}
     }
+
+  pthread_mutex_unlock (&locator_Keep.lockhint_areas.lock);
 
   if (lockhint == NULL)
     {
@@ -1758,6 +1789,10 @@ locator_reallocate_lockhint (LC_LOCKHINT * lockhint, int max_classes)
 void
 locator_free_lockhint (LC_LOCKHINT * lockhint)
 {
+#if defined (SERVER_MODE)  || (defined(CS_MODE) && defined(MULTI_CONN_TO_A_SERVER))
+  int rv;
+#endif /* SERVER_MODE */
+
   if (lockhint->packed)
     {
       locator_free_packed (lockhint->packed, lockhint->packed_size);
@@ -1765,7 +1800,7 @@ locator_free_lockhint (LC_LOCKHINT * lockhint)
       lockhint->packed_size = 0;
     }
 
-  locator_ensure_tls_initialized ();
+  rv = pthread_mutex_lock (&locator_Keep.lockhint_areas.lock);
 
   if (locator_Keep.lockhint_areas.number < LOCATOR_NKEEP_LIMIT)
     {
@@ -1780,6 +1815,8 @@ locator_free_lockhint (LC_LOCKHINT * lockhint)
     {
       free_and_init (lockhint);
     }
+
+  pthread_mutex_unlock (&locator_Keep.lockhint_areas.lock);
 }
 
 #if defined(CUBRID_DEBUG)

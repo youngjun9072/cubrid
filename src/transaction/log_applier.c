@@ -7870,11 +7870,11 @@ la_flush_repl_items (bool immediate, LA_APPLY_STATS * stats)
 	int _worker_idx = la_get_page_buffer_owner_index ();
 	er_log_debug (ARG_FILE_LINE,
 		      "la_flush_repl_items_milestone calls=%u worker_idx=%d tid=%lu "
-		      "client_support_addr=%p locator_repl_addr=%p locator_keep_addr=%p "
+		      "client_support_addr=%p locator_repl_addr=%p "
 		      "tran_idx=%d session_id=%u num_repl_objs=%d immediate=%d\n",
 		      _flush_call_count, _worker_idx, (unsigned long) pthread_self (),
 		      (void *) &__gv_client_support, (void *) &__gv_locator_repl,
-		      locator_get_keep_addr (), tm_Tran_index,
+		      tm_Tran_index,
 		      (unsigned int) db_Session_id, num_repl_objs, (int) immediate);
       }
   }
@@ -8043,11 +8043,11 @@ la_repl_add_object (MOP classop, LA_ITEM * item, RECDES * recdes)
 	int _worker_idx = la_get_page_buffer_owner_index ();
 	er_log_debug (ARG_FILE_LINE,
 		      "la_repl_add_object_milestone calls=%u worker_idx=%d tid=%lu "
-		      "client_support_addr=%p locator_repl_addr=%p locator_keep_addr=%p "
+		      "client_support_addr=%p locator_repl_addr=%p "
 		      "tran_idx=%d session_id=%u\n",
 		      _add_obj_call_count, _worker_idx, (unsigned long) pthread_self (),
 		      (void *) &__gv_client_support, (void *) &__gv_locator_repl,
-		      locator_get_keep_addr (), tm_Tran_index,
+		      tm_Tran_index,
 		      (unsigned int) db_Session_id);
       }
   }
