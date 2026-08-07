@@ -969,11 +969,7 @@ static int la_copy_worker_credential_string (const char *source, char **copy_p);
 static int la_detach_worker_server_credential (BOOT_SERVER_CREDENTIAL * credential);
 static void la_clear_worker_server_credential_private (BOOT_SERVER_CREDENTIAL * credential);
 static void la_clear_worker_server_credential (BOOT_SERVER_CREDENTIAL * credential);
-static int la_apply_worker_register_client (LA_APPLY_WORKER_SESSION * session);
-static void la_apply_worker_unregister_client (LA_APPLY_WORKER_SESSION * session);
-static int la_apply_worker_start_client_context (LA_APPLY_WORKER_SESSION * session);
-static void la_apply_worker_end_client_context (LA_APPLY_WORKER_SESSION * session);
-static int la_apply_worker_start_session (LA_APPLY_WORKER_SESSION * session);
+static int la_apply_worker_start_session (LA_APPLY_WORKER_SESSION * session, int sub_index);
 static void la_apply_worker_end_session (LA_APPLY_WORKER_SESSION * session);
 static int la_apply_worker_context_init (LA_APPLY_WORKER_CONTEXT * context, int db_page_size);
 static void la_apply_worker_context_final (LA_APPLY_WORKER_CONTEXT * context);
@@ -2165,158 +2161,9 @@ la_clear_worker_server_credential (BOOT_SERVER_CREDENTIAL * credential)
   la_init_worker_server_credential (credential);
 }
 
-static int
-la_apply_worker_register_client (LA_APPLY_WORKER_SESSION * session)
-{
-#if defined(CS_MODE) && defined(MULTI_CONN_TO_A_SERVER)
-  BOOT_CLIENT_CREDENTIAL client_credential;
-  TRAN_STATE tran_state;
-  TRAN_ISOLATION isolation = TRAN_DEFAULT_ISOLATION_LEVEL ();
-  int tran_index;
-  int lock_wait_msecs = TRAN_LOCK_INFINITE_WAIT;
-
-  /* TODO: keep the Reader restart credential and copy user/login/host for worker registration. */
-  client_credential.client_type = (BOOT_CLIENT_TYPE) db_get_client_type ();
-  client_credential.db_name = la_slave_db_name;
-  client_credential.set_user ("DBA");
-  client_credential.program_name = db_Program_name;
-  client_credential.login_name = db_Program_name;
-  client_credential.host_name = boot_get_host_name ();
-  client_credential.process_id = getpid ();
-
-  tran_index =
-    boot_register_client (&client_credential, lock_wait_msecs, isolation, &tran_state, &session->server_credential);
-  if (tran_index == NULL_TRAN_INDEX)
-    {
-      la_clear_worker_server_credential_private (&session->server_credential);
-      return er_errid () == NO_ERROR ? ER_FAILED : er_errid ();
-    }
-
-  tran_cache_tran_settings (tran_index, lock_wait_msecs, isolation);
-  session->client_registered = true;
-
-  if (la_detach_worker_server_credential (&session->server_credential) != NO_ERROR)
-    {
-      (void) boot_unregister_client (tm_Tran_index);
-      tm_Tran_index = NULL_TRAN_INDEX;
-      session->client_registered = false;
-      la_clear_worker_server_credential_private (&session->server_credential);
-      return er_errid () == NO_ERROR ? ER_FAILED : er_errid ();
-    }
-#endif
-
-  return NO_ERROR;
-}
-
-static void
-la_apply_worker_unregister_client (LA_APPLY_WORKER_SESSION * session)
-{
-#if defined(CS_MODE) && defined(MULTI_CONN_TO_A_SERVER)
-  if (session->client_registered)
-    {
-      (void) boot_unregister_client (tm_Tran_index);
-      tm_Tran_index = NULL_TRAN_INDEX;
-      session->client_registered = false;
-    }
-
-  la_clear_worker_server_credential (&session->server_credential);
-#endif
-}
 
 static int
-la_apply_worker_start_client_context (LA_APPLY_WORKER_SESSION * session)
-{
-#if defined(CS_MODE) && defined(MULTI_CONN_TO_A_SERVER)
-  int error;
-  MOP dba_user;
-
-  error = ws_init ();
-  if (error != NO_ERROR)
-    {
-      return error;
-    }
-
-  sm_init (&session->server_credential.root_class_oid, &session->server_credential.root_class_hfid);
-
-  error = au_start ();
-  if (error != NO_ERROR)
-    {
-      sm_final ();
-      ws_final ();
-      return error;
-    }
-
-  error = db_find_or_create_session ("DBA", db_Program_name);
-  if (error != NO_ERROR)
-    {
-      au_final ();
-      sm_final ();
-      ws_final ();
-      return error;
-    }
-
-  dba_user = au_find_user ("DBA");
-  if (dba_user == NULL)
-    {
-      db_set_session_id (DB_EMPTY_SESSION);
-      au_final ();
-      sm_final ();
-      ws_final ();
-
-      return er_errid () == NO_ERROR ? ER_FAILED : er_errid ();
-    }
-
-  error = AU_SET_USER (dba_user);
-  if (error != NO_ERROR)
-    {
-      db_set_session_id (DB_EMPTY_SESSION);
-      au_final ();
-      sm_final ();
-      ws_final ();
-      return error;
-    }
-
-  tr_init ();
-  (void) db_disable_trigger ();
-
-  session->client_context_started = true;
-#endif
-
-  return NO_ERROR;
-}
-
-static void
-la_apply_worker_end_client_context (LA_APPLY_WORKER_SESSION * session)
-{
-#if defined(CS_MODE) && defined(MULTI_CONN_TO_A_SERVER)
-  if (session->client_context_started)
-    {
-      /* Serialize client-context teardown with worker startup using the same lock
-       * (la_worker_init_mutex) that la_apply_worker_start_session holds while it
-       * builds the context, so a finalizing worker never races a starting one.
-       *
-       * WARNING: do NOT call this function while already holding
-       * la_worker_init_mutex. The startup-error rollback path calls the raw
-       * au_final/sm_final/ws_final directly (already inside the lock), NOT this
-       * function; reusing this function on a locked path would self-deadlock.
-       *
-       * locator_free_areas() at worker exit is pure thread-local state and stays
-       * outside this lock. */
-      er_log_debug (ARG_FILE_LINE, "ws_teardown client-context teardown lock enter (session=%p)", (void *) session);
-      pthread_mutex_lock (&la_worker_init_mutex);
-      au_final ();
-      sm_final ();
-      ws_final ();
-      pthread_mutex_unlock (&la_worker_init_mutex);
-      er_log_debug (ARG_FILE_LINE, "ws_teardown client-context teardown lock exit (session=%p)", (void *) session);
-      db_set_session_id (DB_EMPTY_SESSION);
-      session->client_context_started = false;
-    }
-#endif
-}
-
-static int
-la_apply_worker_start_session (LA_APPLY_WORKER_SESSION * session)
+la_apply_worker_start_session (LA_APPLY_WORKER_SESSION * session, int sub_index)
 {
   int error = NO_ERROR;
 
@@ -2324,37 +2171,22 @@ la_apply_worker_start_session (LA_APPLY_WORKER_SESSION * session)
 
 #if defined(CS_MODE) && defined(MULTI_CONN_TO_A_SERVER)
   memset (session, 0, sizeof (*session));
-  la_init_worker_server_credential (&session->server_credential);
 
-  /* TODO: Initialize a worker-local network target before net_client_sub_init()
-   * so applylogdb workers do not rely on shared client target state.
-   */
-  error = net_client_sub_init ();
+  /* CS-team official sub-client bring-up. db_restart_sub() -> boot_restart_client_sub()
+   * performs net_client_sub_init + boot_register_client + ws_init/sm_init/au_start +
+   * db_find_or_create_session inside the library, replacing the hand-assembled glue. */
+  error = db_restart_sub (sub_index);
   if (error != NO_ERROR)
     {
       goto out;
     }
 
-  session->css_started = true;
+  session->client_context_started = true;
 
-  error = la_apply_worker_register_client (session);
-  if (error != NO_ERROR)
-    {
-      net_client_sub_final ();
-      session->css_started = false;
-      goto out;
-    }
-
-  boot_set_server_session_key (session->server_credential.server_session_key);
-
-  error = la_apply_worker_start_client_context (session);
-  if (error != NO_ERROR)
-    {
-      la_apply_worker_unregister_client (session);
-      net_client_sub_final ();
-      session->css_started = false;
-      goto out;
-    }
+  /* boot_restart_client_sub() leaves trigger init out (tr_init is commented there),
+   * so the worker must set up and disable triggers itself for replay (import doc S2.2). */
+  tr_init ();
+  (void) db_disable_trigger ();
 #endif
 
   __gv_loc_repl.ws_init_repl_objs ();
@@ -2371,13 +2203,12 @@ la_apply_worker_end_session (LA_APPLY_WORKER_SESSION * session)
   __gv_loc_repl.ws_clear_all_repl_errors_of_error_link ();
 
 #if defined(CS_MODE) && defined(MULTI_CONN_TO_A_SERVER)
-  la_apply_worker_unregister_client (session);
-  la_apply_worker_end_client_context (session);
-
-  if (session->css_started)
+  /* Symmetric CS-team teardown: db_shutdown_sub() -> boot_finalize_client_sub()
+   * performs net_client_sub_final + au_final + sm_final + ws_final. */
+  if (session->client_context_started)
     {
-      net_client_sub_final ();
-      session->css_started = false;
+      (void) db_shutdown_sub ();
+      session->client_context_started = false;
     }
 #endif
 }
@@ -3355,7 +3186,7 @@ la_apply_worker_main (void *arg)
   er_context_p = new cuberr::context ();
   er_context_p->register_thread_local ();
 
-  error = la_apply_worker_start_session (&session);
+  error = la_apply_worker_start_session (&session, (int) (worker - la_apply_Workers));
   if (error != NO_ERROR)
     {
       la_applier_need_shutdown = true;
