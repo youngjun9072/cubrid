@@ -121,7 +121,7 @@
 #define BOOT_NO_OPT_CAP                 0
 #define BOOT_CHECK_HA_DELAY_CAP         NET_CAP_HA_REPL_DELAY
 
-static BOOT_SERVER_CREDENTIAL boot_Server_credential = {
+static CUB_THREAD_LOCAL BOOT_SERVER_CREDENTIAL boot_Server_credential = {
   /* db_full_name */ NULL, /* host_name */ NULL, /* lob_path */ NULL,
   /* process_id */ -1,
   /* root_class_oid */ {NULL_PAGEID, NULL_SLOTID, NULL_VOLID},
@@ -652,6 +652,7 @@ boot_restart_failure_cleanup (DB_INFO * db,
     }
   else
     {
+#if !defined(SA_MODE)
       if (boot_Server_credential.db_full_name)
 	{
 	  db_private_free_and_init (NULL, boot_Server_credential.db_full_name);
@@ -660,6 +661,7 @@ boot_restart_failure_cleanup (DB_INFO * db,
 	{
 	  db_private_free_and_init (NULL, boot_Server_credential.host_name);
 	}
+#endif
 
       showstmt_metadata_final ();
       tran_free_savepoint_list ();
@@ -1487,6 +1489,9 @@ boot_restart_client_sub (BOOT_CLIENT_CREDENTIAL * client_credential)
   /* Initialize client modules for execution */
   boot_client (tran_index, tran_lock_wait_msecs, tran_isolation);
 
+  //oid_set_root (&boot_Server_credential.root_class_oid);
+  //OID_INIT_TEMPID ();
+
   sm_init (&boot_Server_credential.root_class_oid, &boot_Server_credential.root_class_hfid, true);
   au_init ();			/* initialize authorization globals */
 
@@ -1502,8 +1507,8 @@ boot_restart_client_sub (BOOT_CLIENT_CREDENTIAL * client_credential)
   /* FIX-ME) Locks are used to prevent concurrency until thread-safe handling 
    * for system parameter global variables is fully implemented."
    */
-  sysprm_load_session_parameters ();
   pthread_mutex_lock (&g_db_restart_client_sub_mutex);
+  sysprm_load_session_parameters ();
   (void) db_find_or_create_session (client_credential->get_db_user (), client_credential->get_program_name ());
   pthread_mutex_unlock (&g_db_restart_client_sub_mutex);
 #if 0
@@ -1782,6 +1787,7 @@ boot_client_all_finalize (int final_level)
 
   if (BOOT_IS_CLIENT_RESTARTED () || boot_Is_client_all_final == false)
     {
+#if !defined(SA_MODE)
       if (boot_Server_credential.db_full_name)
 	{
 	  db_private_free_and_init (NULL, boot_Server_credential.db_full_name);
@@ -1798,6 +1804,7 @@ boot_client_all_finalize (int final_level)
 	{
 	  db_private_free_and_init (NULL, boot_Server_credential.db_lang);
 	}
+#endif
 
       showstmt_metadata_final ();
       tran_free_savepoint_list ();
