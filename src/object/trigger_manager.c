@@ -141,7 +141,7 @@ const char *TR_ATT_UPDATED_TIME = "updated_time";
 
 int tr_Current_depth = 0;
 int tr_Maximum_depth = TR_MAX_RECURSION_LEVEL;
-static OID tr_Stack[TR_MAX_RECURSION_LEVEL + 1];
+OID tr_Stack[TR_MAX_RECURSION_LEVEL + 1];
 
 bool tr_Invalid_transaction = false;
 char tr_Invalid_transaction_trigger[SM_MAX_IDENTIFIER_LENGTH + 2];

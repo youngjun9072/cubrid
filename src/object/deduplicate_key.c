@@ -29,7 +29,6 @@
 #include <assert.h>
 
 #include "dbtype.h"
-#include "db_multi_threads_connections.h"
 #if defined(SERVER_MODE) || defined(SA_MODE)
 #include "object_representation.h"
 #include "object_primitive.h"

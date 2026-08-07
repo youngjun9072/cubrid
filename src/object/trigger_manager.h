@@ -28,7 +28,6 @@
 #include "memory_alloc.h"
 #include "dbtype_def.h"
 #include "class_object.h"
-#include "db_multi_threads_connections.h"
 
 /*
  * TR_LOWEST_PRIORITY
