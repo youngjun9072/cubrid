@@ -175,8 +175,8 @@ dk_get_deduplicate_key_value (OID * rec_oid, int att_id, DB_VALUE * value)
 #if !defined(SERVER_MODE)
 
 // SM_ATTRIBUTE and DB_ATTRIBUTE are the same thing.
-static CUB_THREAD_LOCAL SM_ATTRIBUTE *st_sm_atts[COUNT_OF_DEDUPLICATE_KEY_LEVEL];
-static CUB_THREAD_LOCAL bool st_sm_atts_init = false;
+static SM_ATTRIBUTE *st_sm_atts[COUNT_OF_DEDUPLICATE_KEY_LEVEL];
+static bool st_sm_atts_init = false;
 
 static void
 dk_sm_attribute_finalized ()

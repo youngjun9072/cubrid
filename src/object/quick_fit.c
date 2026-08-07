@@ -39,9 +39,9 @@
 #error Does not belong to server module
 #endif
 
-static CUB_THREAD_LOCAL HL_HEAPID ws_Heap_id = 0;
+static HL_HEAPID ws_Heap_id = 0;
 
-static CUB_THREAD_LOCAL pthread_t ws_Heap_Owner_id = (pthread_t) (-1);
+static pthread_t ws_Heap_Owner_id = (pthread_t) (-1);
 static int use_utility_theads = 0;
 
 #define DB_IS_UTILITY_THREAD() ((ws_Heap_id == 0 || use_utility_theads == 0) ? false : (pthread_self () != ws_Heap_Owner_id))

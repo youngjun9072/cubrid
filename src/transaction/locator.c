@@ -88,11 +88,11 @@ struct locator_global
  * pool, eliminating contention and double-free races that previously
  * surfaced when SA-mode applylogdb drove N worker threads through a
  * single shared locator_Keep. */
-static __thread LOCATOR_GLOBAL locator_Keep;
+static LOCATOR_GLOBAL locator_Keep;
 
-static __thread LC_COPYAREA packed_req_area_ptrs[LOCATOR_NKEEP_LIMIT];
+static LC_COPYAREA packed_req_area_ptrs[LOCATOR_NKEEP_LIMIT];
 
-static __thread bool locator_Is_initialized = false;
+static bool locator_Is_initialized = false;
 
 static void locator_ensure_tls_initialized (void);
 

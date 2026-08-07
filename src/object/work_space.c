@@ -106,7 +106,7 @@ CUB_THREAD_LOCAL DB_OBJLIST *ws_Resident_classes = NULL;
 
 CUB_THREAD_LOCAL WS_STATISTICS ws_Stats = { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
 
-CUB_THREAD_LOCAL int ws_Num_dirty_mop = 0;
+int ws_Num_dirty_mop = 0;
 
 /*
  * We used to keep a global dirty list here. But for more efficient traversals
@@ -159,8 +159,8 @@ static CUB_THREAD_LOCAL unsigned int ws_MVCC_snapshot_version = 0;
  *
  */
 
-CUB_THREAD_LOCAL int ws_Error_ignore_list[-ER_LAST_ERROR];
-CUB_THREAD_LOCAL int ws_Error_ignore_count = 0;
+int ws_Error_ignore_list[-ER_LAST_ERROR];
+int ws_Error_ignore_count = 0;
 
 #define OBJLIST_AREA_COUNT 4096
 
