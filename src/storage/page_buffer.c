@@ -12301,6 +12301,19 @@ pgbuf_ordered_fix_release (THREAD_ENTRY * thread_p, const VPID * req_vpid, PAGE_
 
 	  if (VPID_EQ (req_vpid, &(holder->bufptr->vpid)))
 	    {
+#if !defined(NDEBUG)
+	      if (!PGBUF_IS_ORDERED_PAGETYPE (holder->bufptr->iopage_buffer->iopage.prv.ptype))
+		{
+		  /* Tripwire: log the dying page identity before the assert aborts -
+		   * ASan runs produced no usable core for this spot. */
+		  er_log_debug (ARG_FILE_LINE,
+				"ORDERED_FIX BAD PTYPE (fix path): holder vpid=%d|%d ptype=%d req_vpid=%d|%d tran=%d\n",
+				(int) holder->bufptr->vpid.volid, (int) holder->bufptr->vpid.pageid,
+				(int) holder->bufptr->iopage_buffer->iopage.prv.ptype, (int) req_vpid->volid,
+				(int) req_vpid->pageid, LOG_FIND_THREAD_TRAN_INDEX (thread_p));
+		  fflush (NULL);
+		}
+#endif /* !NDEBUG */
 	      assert (PGBUF_IS_ORDERED_PAGETYPE (holder->bufptr->iopage_buffer->iopage.prv.ptype));
 
 	      if (req_page_has_group == false && holder->first_watcher != NULL)
@@ -12405,6 +12418,18 @@ pgbuf_ordered_fix_release (THREAD_ENTRY * thread_p, const VPID * req_vpid, PAGE_
 	  continue;
 	}
 
+#if !defined(NDEBUG)
+      if (!PGBUF_IS_ORDERED_PAGETYPE (holder->bufptr->iopage_buffer->iopage.prv.ptype))
+	{
+	  /* Tripwire: same as the fix-path log above, for the holder-scan path. */
+	  er_log_debug (ARG_FILE_LINE,
+			"ORDERED_FIX BAD PTYPE (holder scan): holder vpid=%d|%d ptype=%d req_vpid=%d|%d tran=%d\n",
+			(int) holder->bufptr->vpid.volid, (int) holder->bufptr->vpid.pageid,
+			(int) holder->bufptr->iopage_buffer->iopage.prv.ptype, (int) req_vpid->volid,
+			(int) req_vpid->pageid, LOG_FIND_THREAD_TRAN_INDEX (thread_p));
+	  fflush (NULL);
+	}
+#endif /* !NDEBUG */
       assert (PGBUF_IS_ORDERED_PAGETYPE (holder->bufptr->iopage_buffer->iopage.prv.ptype));
 
       if (saved_pages_cnt >= PGBUF_MAX_PAGE_FIXED_BY_TRAN)
