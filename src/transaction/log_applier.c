@@ -10707,6 +10707,33 @@ la_shutdown (void)
 {
   int i;
 
+#if !defined (WINDOWS)
+  /* Death trace: every applier exit passes through here. Append one line to a small
+   * dedicated file that never rotates, so the exit reason survives error-log rotation
+   * storms (the regular .err can rotate away within seconds under an error storm). */
+  {
+    char death_path[PATH_MAX];
+    FILE *death_fp;
+
+    envvar_logdir_file (death_path, PATH_MAX, "applylogdb_death.log");
+    death_fp = fopen (death_path, "a");
+    if (death_fp != NULL)
+      {
+	time_t death_now = time (NULL);
+	char death_tstr[32];
+
+	strftime (death_tstr, sizeof (death_tstr), "%m/%d/%y %H:%M:%S", localtime (&death_now));
+	fprintf (death_fp,
+		 "%s pid=%d la_shutdown: last_error=%d need_shutdown=%d by_signal=%d hb_proc_shutdown=%d "
+		 "final_lsa=%lld|%d committed_lsa=%lld|%d\n", death_tstr, (int) getpid (), er_errid (),
+		 (int) la_applier_need_shutdown, (int) la_applier_shutdown_by_signal, (int) hb_Proc_shutdown,
+		 (long long) la_Info.final_lsa.pageid, (int) la_Info.final_lsa.offset,
+		 (long long) la_Info.committed_lsa.pageid, (int) la_Info.committed_lsa.offset);
+	fclose (death_fp);
+      }
+  }
+#endif /* !WINDOWS */
+
   la_stop_apply_workers ();
 #if !defined (NDEBUG)
   la_log_parallel_apply_window ("shutdown");

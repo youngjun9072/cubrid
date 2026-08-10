@@ -254,7 +254,14 @@ struct lc_copy_area
 {
   char *mem;			/* Pointer to location of chunk of area */
   int length;			/* The size of the area */
+  int dbg_state;		/* Tripwire: LOCATOR_CA_STATE_INUSE/POOLED (double-free detection) */
+  unsigned long dbg_owner_tid;	/* Tripwire: thread that allocated this area */
 };
+
+/* Tripwire states for LC_COPYAREA.dbg_state: detect double-free into the
+ * locator_Keep pool and reuse of an area that is still owned by a thread. */
+#define LOCATOR_CA_STATE_INUSE  0x0A110CED
+#define LOCATOR_CA_STATE_POOLED 0x0F4EEDCA
 
 typedef struct lc_copyarea_desc LC_COPYAREA_DESC;
 struct lc_copyarea_desc

@@ -31,6 +31,7 @@
 #include "object_representation.h"
 #include "error_manager.h"
 #include "storage_common.h"
+#include "system_parameter.h"
 #if defined(SERVER_MODE)
 #include "connection_error.h"
 #endif /* SERVER_MODE */
@@ -434,6 +435,19 @@ locator_allocate_copy_area_by_length (int min_length)
 	  copyarea = locator_Keep.copy_areas.areas[i];
 	  locator_Keep.copy_areas.areas[i] = locator_Keep.copy_areas.areas[--locator_Keep.copy_areas.number];
 	  min_length = copyarea->length;
+#if !defined(NDEBUG)
+	  if (copyarea->dbg_state != LOCATOR_CA_STATE_POOLED)
+	    {
+	      /* Tripwire: an area sitting in the pool must be POOLED; anything else means
+	       * a double-free put an in-use area back into the pool. */
+	      er_log_debug (ARG_FILE_LINE,
+			    "COPYAREA GUARD: pool handed out area %p with state 0x%x (owner_tid=%lu self_tid=%lu)\n",
+			    (void *) copyarea, copyarea->dbg_state, copyarea->dbg_owner_tid,
+			    (unsigned long) pthread_self ());
+	      fflush (NULL);
+	      abort ();
+	    }
+#endif /* !NDEBUG */
 	  /*
 	   * Make sure that the caller is not assuming that the area is
 	   * initialized to zeros. That is, make sure caller initialize the area
@@ -458,6 +472,8 @@ locator_allocate_copy_area_by_length (int min_length)
 
   copyarea->mem = (char *) copyarea + sizeof (*copyarea);
   copyarea->length = min_length;
+  copyarea->dbg_state = LOCATOR_CA_STATE_INUSE;
+  copyarea->dbg_owner_tid = (unsigned long) pthread_self ();
 
   return copyarea;
 }
@@ -536,6 +552,33 @@ locator_free_copy_area (LC_COPYAREA * copyarea)
   int rv;
 #endif /* SERVER_MODE */
 
+#if !defined(NDEBUG)
+  if (copyarea->dbg_state == LOCATOR_CA_STATE_POOLED)
+    {
+      /* Tripwire: this area was already returned to the pool - double free. */
+      er_log_debug (ARG_FILE_LINE,
+		    "COPYAREA DOUBLE-FREE: area %p is already pooled (owner_tid=%lu self_tid=%lu)\n",
+		    (void *) copyarea, copyarea->dbg_owner_tid, (unsigned long) pthread_self ());
+      fflush (NULL);
+      abort ();
+    }
+  if (copyarea->dbg_state != LOCATOR_CA_STATE_INUSE)
+    {
+      /* Tripwire: freeing an area that was never handed out by the allocator. */
+      er_log_debug (ARG_FILE_LINE, "COPYAREA GUARD: free of area %p with bad state 0x%x (self_tid=%lu)\n",
+		    (void *) copyarea, copyarea->dbg_state, (unsigned long) pthread_self ());
+      fflush (NULL);
+      abort ();
+    }
+  if (copyarea->dbg_owner_tid != (unsigned long) pthread_self ())
+    {
+      /* Cross-thread free: may be legal in some server paths, so no abort. Logged loudly
+       * because it is the prime suspect pattern for the parallel applier copyarea corruption. */
+      er_log_debug (ARG_FILE_LINE, "COPYAREA CROSS-THREAD FREE: area %p owner_tid=%lu freed by tid=%lu\n",
+		    (void *) copyarea, copyarea->dbg_owner_tid, (unsigned long) pthread_self ());
+    }
+#endif /* !NDEBUG */
+
   if (LOCATOR_CACHED_COPYAREA_SIZE_LIMIT < (size_t) copyarea->length)
     {
       free_and_init (copyarea);
@@ -545,6 +588,23 @@ locator_free_copy_area (LC_COPYAREA * copyarea)
   rv = pthread_mutex_lock (&locator_Keep.copy_areas.lock);
   if (locator_Keep.copy_areas.number < LOCATOR_NKEEP_LIMIT)
     {
+#if !defined(NDEBUG)
+      int j;
+
+      for (j = 0; j < locator_Keep.copy_areas.number; j++)
+	{
+	  if (locator_Keep.copy_areas.areas[j] == copyarea)
+	    {
+	      /* Tripwire: same pointer already in the pool - double free. */
+	      er_log_debug (ARG_FILE_LINE,
+			    "COPYAREA DOUBLE-FREE: area %p already in pool slot %d (self_tid=%lu)\n",
+			    (void *) copyarea, j, (unsigned long) pthread_self ());
+	      fflush (NULL);
+	      abort ();
+	    }
+	}
+#endif /* !NDEBUG */
+      copyarea->dbg_state = LOCATOR_CA_STATE_POOLED;
       /* Scramble the memory, so that the developer detects invalid references to free'd areas */
       MEM_REGION_SCRAMBLE (copyarea->mem, copyarea->length);
       locator_Keep.copy_areas.areas[locator_Keep.copy_areas.number++] = copyarea;
@@ -680,11 +740,15 @@ locator_send_copy_area (LC_COPYAREA * copyarea, char **contents_ptr, int *conten
   int offset = -1;
   int i, len;
   char *end;
+  int num_objs_at_desc_alloc;
 
   *contents_ptr = copyarea->mem;
 
   mobjs = LC_MANYOBJS_PTR_IN_COPYAREA (copyarea);
-  *desc_length = DB_ALIGN (LC_AREA_ONEOBJ_PACKED_SIZE, MAX_ALIGNMENT) * mobjs->num_objs;
+  /* Tripwire: snapshot num_objs once; the descriptor buffer is sized from this value and
+   * the packing below must not see a different count (concurrent copyarea modification). */
+  num_objs_at_desc_alloc = mobjs->num_objs;
+  *desc_length = DB_ALIGN (LC_AREA_ONEOBJ_PACKED_SIZE, MAX_ALIGNMENT) * num_objs_at_desc_alloc;
   if (encode_endian)
     {
       *desc_ptr = (char *) malloc (*desc_length);
@@ -736,7 +800,7 @@ locator_send_copy_area (LC_COPYAREA * copyarea, char **contents_ptr, int *conten
 
   if (encode_endian)
     {
-      end = locator_pack_copy_area_descriptor (mobjs->num_objs, copyarea, *desc_ptr, *desc_length);
+      end = locator_pack_copy_area_descriptor (num_objs_at_desc_alloc, copyarea, *desc_ptr, *desc_length);
 
       len = CAST_BUFLEN (end - *desc_ptr);
     }
@@ -752,7 +816,20 @@ locator_send_copy_area (LC_COPYAREA * copyarea, char **contents_ptr, int *conten
   assert (len <= *desc_length);
   *desc_length = len;
 
-  return mobjs->num_objs;
+#if !defined(NDEBUG)
+  if (mobjs->num_objs != num_objs_at_desc_alloc)
+    {
+      /* Tripwire: another thread modified this copyarea while it was being sent. */
+      er_log_debug (ARG_FILE_LINE,
+		    "COPYAREA RACE: num_objs changed during send: at_alloc=%d now=%d area=%p owner_tid=%lu"
+		    " self_tid=%lu\n", num_objs_at_desc_alloc, mobjs->num_objs, (void *) copyarea,
+		    copyarea->dbg_owner_tid, (unsigned long) pthread_self ());
+      fflush (NULL);
+      abort ();
+    }
+#endif /* !NDEBUG */
+
+  return num_objs_at_desc_alloc;
 }
 
 /*
