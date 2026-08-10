@@ -452,7 +452,17 @@ locator_allocate_copy_area_by_length (int min_length)
 	   * Make sure that the caller is not assuming that the area is
 	   * initialized to zeros. That is, make sure caller initialize the area
 	   */
-	  MEM_REGION_SCRAMBLE (copyarea, copyarea->length);
+	  {
+	    /* Tripwire: the scramble below wipes the struct header too - preserve the
+	     * ownership history across it. */
+	    unsigned long save_owner = copyarea->dbg_owner_tid;
+	    unsigned long save_hist[4];
+
+	    memcpy (save_hist, copyarea->dbg_owner_hist, sizeof (save_hist));
+	    MEM_REGION_SCRAMBLE (copyarea, copyarea->length);
+	    copyarea->dbg_owner_tid = save_owner;
+	    memcpy (copyarea->dbg_owner_hist, save_hist, sizeof (save_hist));
+	  }
 	  break;
 	}
     }
@@ -468,11 +478,19 @@ locator_allocate_copy_area_by_length (int min_length)
 		  (size_t) (min_length + sizeof (*copyarea)));
 	  return NULL;
 	}
+      /* Tripwire: fresh area - start with a clean ownership history. */
+      copyarea->dbg_owner_tid = 0;
+      memset (copyarea->dbg_owner_hist, 0, sizeof (copyarea->dbg_owner_hist));
     }
 
   copyarea->mem = (char *) copyarea + sizeof (*copyarea);
   copyarea->length = min_length;
   copyarea->dbg_state = LOCATOR_CA_STATE_INUSE;
+  /* Tripwire: push the previous owner into the history ring, then stamp the new owner. */
+  copyarea->dbg_owner_hist[3] = copyarea->dbg_owner_hist[2];
+  copyarea->dbg_owner_hist[2] = copyarea->dbg_owner_hist[1];
+  copyarea->dbg_owner_hist[1] = copyarea->dbg_owner_hist[0];
+  copyarea->dbg_owner_hist[0] = copyarea->dbg_owner_tid;
   copyarea->dbg_owner_tid = (unsigned long) pthread_self ();
 
   return copyarea;
@@ -749,6 +767,36 @@ locator_send_copy_area (LC_COPYAREA * copyarea, char **contents_ptr, int *conten
    * the packing below must not see a different count (concurrent copyarea modification). */
   num_objs_at_desc_alloc = mobjs->num_objs;
   *desc_length = DB_ALIGN (LC_AREA_ONEOBJ_PACKED_SIZE, MAX_ALIGNMENT) * num_objs_at_desc_alloc;
+
+#if !defined(NDEBUG)
+  /* Tripwire: final gate before the descriptor leaves the client. Catches corrupted
+   * entries regardless of cause (race, content overrun, reset bug) - including
+   * zero-filled entries (class_oid 0|0 is never legal; NULL uses -1 in CUBRID),
+   * which is exactly the signature that killed the server on 2026-08-06 (VPID 0|0).
+   * On hit, dump the current sender and the copyarea ownership history. */
+  for (i = 0; i < num_objs_at_desc_alloc; i++)
+    {
+      LC_COPYAREA_ONEOBJ *chk = LC_FIND_ONEOBJ_PTR_IN_COPYAREA (mobjs, i);
+
+      if (chk->operation < LC_FETCH || chk->operation > LC_FETCH_VERIFY_CHN
+	  || chk->length < 0 || chk->length > copyarea->length
+	  || (chk->offset != -1 && (chk->offset < 0 || chk->offset + chk->length > copyarea->length))
+	  || (chk->class_oid.pageid == 0 && chk->class_oid.volid == 0))
+	{
+	  er_log_debug (ARG_FILE_LINE,
+			"COPYAREA CORRUPT ENTRY: idx=%d/%d op=%d len=%d offset=%d class_oid=%d|%d|%d oid=%d|%d|%d"
+			" area=%p(len=%d) self_tid=%lu owner_tid=%lu owner_hist=[%lu,%lu,%lu,%lu]\n",
+			i, num_objs_at_desc_alloc, (int) chk->operation, chk->length, chk->offset,
+			(int) chk->class_oid.volid, (int) chk->class_oid.pageid, (int) chk->class_oid.slotid,
+			(int) chk->oid.volid, (int) chk->oid.pageid, (int) chk->oid.slotid,
+			(void *) copyarea, copyarea->length, (unsigned long) pthread_self (),
+			copyarea->dbg_owner_tid, copyarea->dbg_owner_hist[0], copyarea->dbg_owner_hist[1],
+			copyarea->dbg_owner_hist[2], copyarea->dbg_owner_hist[3]);
+	  fflush (NULL);
+	  abort ();
+	}
+    }
+#endif /* !NDEBUG */
   if (encode_endian)
     {
       *desc_ptr = (char *) malloc (*desc_length);

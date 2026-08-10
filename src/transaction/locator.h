@@ -256,6 +256,7 @@ struct lc_copy_area
   int length;			/* The size of the area */
   int dbg_state;		/* Tripwire: LOCATOR_CA_STATE_INUSE/POOLED (double-free detection) */
   unsigned long dbg_owner_tid;	/* Tripwire: thread that allocated this area */
+  unsigned long dbg_owner_hist[4];	/* Tripwire: previous allocator tids ([0]=most recent) */
 };
 
 /* Tripwire states for LC_COPYAREA.dbg_state: detect double-free into the
