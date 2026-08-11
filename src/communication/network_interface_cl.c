@@ -676,14 +676,6 @@ locator_repl_force (LC_COPYAREA * copy_area, LC_COPYAREA ** reply_copy_area)
   request_ptr = or_pack_int (request_ptr, desc_size);
   request_ptr = or_pack_int (request_ptr, content_size);
 
-#if !defined (NDEBUG)
-  er_log_debug (ARG_FILE_LINE,
-		"locator_repl_force_begin calls=%llu tid=%lu tm_tran_index=%d "
-		"num_objs=%d desc_size=%d content_size=%d\n",
-		(unsigned long long) _lrf_call_n, _lrf_tid_os, _lrf_tran_idx,
-		num_objs, desc_size, content_size);
-#endif /* !NDEBUG */
-
   req_error =
     net_client_request_3_data_recv_copyarea (NET_SERVER_LC_REPL_FORCE, request,
 					     NET_COPY_AREA_SENDRECV_SIZE, desc_ptr, desc_size,
@@ -705,11 +697,15 @@ locator_repl_force (LC_COPYAREA * copy_area, LC_COPYAREA ** reply_copy_area)
   gettimeofday (&_lrf_end, NULL);
   _lrf_usec = ((INT64) _lrf_end.tv_sec - (INT64) _lrf_begin.tv_sec) * 1000000LL
 	      + ((INT64) _lrf_end.tv_usec - (INT64) _lrf_begin.tv_usec);
-  er_log_debug (ARG_FILE_LINE,
-		"locator_repl_force_end calls=%llu tid=%lu tm_tran_index=%d "
-		"num_objs=%d content_size=%d req_error=%d error_code=%d elapsed_usec=%lld\n",
-		(unsigned long long) _lrf_call_n, _lrf_tid_os, _lrf_tran_idx,
-		num_objs, content_size, req_error, error_code, (long long) _lrf_usec);
+  if (req_error != NO_ERROR || error_code != NO_ERROR)
+    {
+      /* error-only (log diet, 2026-08-11): success latency is covered by periodic stats */
+      er_log_debug (ARG_FILE_LINE,
+		    "locator_repl_force_end calls=%llu tid=%lu tm_tran_index=%d "
+		    "num_objs=%d content_size=%d req_error=%d error_code=%d elapsed_usec=%lld\n",
+		    (unsigned long long) _lrf_call_n, _lrf_tid_os, _lrf_tran_idx,
+		    num_objs, content_size, req_error, error_code, (long long) _lrf_usec);
+    }
 #endif /* !NDEBUG */
 
   if (desc_ptr)

@@ -7885,25 +7885,6 @@ la_flush_repl_items (bool immediate, LA_APPLY_STATS * stats)
 
   num_repl_objs = __gv_loc_repl.ws_get_repl_obj_count ();
 
-#if !defined (NDEBUG)
-  {
-    static __thread unsigned int _flush_call_count = 0;
-    ++_flush_call_count;
-    if ((_flush_call_count % 1000) == 0)
-      {
-	int _worker_idx = la_get_page_buffer_owner_index ();
-	er_log_debug (ARG_FILE_LINE,
-		      "la_flush_repl_items_milestone calls=%u worker_idx=%d tid=%lu "
-		      "client_support_addr=%p locator_repl_addr=%p "
-		      "tran_idx=%d session_id=%u num_repl_objs=%d immediate=%d\n",
-		      _flush_call_count, _worker_idx, (unsigned long) pthread_self (),
-		      (void *) &__gv_client_support, (void *) &__gv_locator_repl,
-		      tm_Tran_index,
-		      (unsigned int) db_Session_id, num_repl_objs, (int) immediate);
-      }
-  }
-#endif /* !NDEBUG */
-
   if (num_repl_objs == 0)
     {
       stats->num_unflushed = 0;
@@ -8058,25 +8039,6 @@ la_repl_add_object (MOP classop, LA_ITEM * item, RECDES * recdes)
 
   class_oid = ws_oid (classop);
 
-#if !defined (NDEBUG)
-  {
-    static __thread unsigned int _add_obj_call_count = 0;
-    ++_add_obj_call_count;
-    if ((_add_obj_call_count % 1000) == 0)
-      {
-	int _worker_idx = la_get_page_buffer_owner_index ();
-	er_log_debug (ARG_FILE_LINE,
-		      "la_repl_add_object_milestone calls=%u worker_idx=%d tid=%lu "
-		      "client_support_addr=%p locator_repl_addr=%p "
-		      "tran_idx=%d session_id=%u\n",
-		      _add_obj_call_count, _worker_idx, (unsigned long) pthread_self (),
-		      (void *) &__gv_client_support, (void *) &__gv_locator_repl,
-		      tm_Tran_index,
-		      (unsigned int) db_Session_id);
-      }
-  }
-#endif /* !NDEBUG */
-
   /* TODO: initialize the worker authorization context so replication apply can run as the intended owner. */
   AU_SAVE_AND_DISABLE (au_save);
 
@@ -8190,6 +8152,19 @@ la_apply_delete_log (LA_APPLY_WORKER_CONTEXT * context, LA_ITEM * item, LA_APPLY
   DB_OBJECT *class_obj;
   int error = NO_ERROR;
 
+#if !defined (NDEBUG)
+  {
+    /* first-DML timing anchor (mirrors parallel_apply_window first_insert) */
+    static bool la_first_delete_logged = false;
+    if (!la_first_delete_logged && item != NULL)
+      {
+	la_first_delete_logged = true;
+	er_log_debug (ARG_FILE_LINE, "parallel_apply_window first_delete lsa=%lld|%d class=%s\n",
+		      (long long) item->lsa.pageid, (int) item->lsa.offset, item->class_name);
+      }
+  }
+#endif /* !NDEBUG */
+
   /* find out class object by class name */
   class_obj = db_find_class (item->class_name);
   if (class_obj == NULL)
@@ -8236,9 +8211,6 @@ end:
 #if !defined (NDEBUG)
       la_debug_note_worker_apply_item (context->worker_idx);
 #endif /* !NDEBUG */
-      LA_DEBUG_LOG (ARG_FILE_LINE,
-		    "threshold_flush delete BEGIN class=%s unflushed=%d pending=%d\n",
-		    item->class_name, stats->num_unflushed, __gv_loc_repl.ws_get_repl_obj_count ());
 #if !defined (NDEBUG)
       la_Debug_worker_current_stage[context->worker_idx] = LA_WORKER_STAGE_APPLY_MID_FLUSH;
 #endif /* !NDEBUG */
@@ -8250,9 +8222,13 @@ end:
 #if !defined (NDEBUG)
       la_Debug_worker_current_stage[context->worker_idx] = LA_WORKER_STAGE_APPLY;
 #endif /* !NDEBUG */
-      LA_DEBUG_LOG (ARG_FILE_LINE,
-		    "threshold_flush delete END class=%s err=%d unflushed=%d pending=%d\n",
-		    item->class_name, error, stats->num_unflushed, __gv_loc_repl.ws_get_repl_obj_count ());
+      if (error != NO_ERROR)
+	{
+	  /* per-row logging demoted to error-only (log diet, 2026-08-11) */
+	  LA_DEBUG_LOG (ARG_FILE_LINE,
+			"threshold_flush delete END class=%s err=%d unflushed=%d pending=%d\n",
+			item->class_name, error, stats->num_unflushed, __gv_loc_repl.ws_get_repl_obj_count ());
+	}
     }
 
 #if !defined (NDEBUG)
@@ -8339,6 +8315,19 @@ la_apply_update_log (LA_APPLY_WORKER_CONTEXT * context, LA_ITEM * item, LA_APPLY
   LOG_PAGE *pgptr = NULL;
   LOG_PAGEID old_pageid = NULL_PAGEID;
   DB_OBJECT *class_obj;
+
+#if !defined (NDEBUG)
+  {
+    /* first-DML timing anchor (mirrors parallel_apply_window first_insert) */
+    static bool la_first_update_logged = false;
+    if (!la_first_update_logged && item != NULL)
+      {
+	la_first_update_logged = true;
+	er_log_debug (ARG_FILE_LINE, "parallel_apply_window first_update lsa=%lld|%d class=%s\n",
+		      (long long) item->lsa.pageid, (int) item->lsa.offset, item->class_name);
+      }
+  }
+#endif /* !NDEBUG */
 
   /* get the target log page */
   old_pageid = item->target_lsa.pageid;
@@ -8445,9 +8434,6 @@ end:
 #if !defined (NDEBUG)
       la_debug_note_worker_apply_item (context->worker_idx);
 #endif /* !NDEBUG */
-      LA_DEBUG_LOG (ARG_FILE_LINE,
-		    "threshold_flush update BEGIN class=%s unflushed=%d pending=%d\n",
-		    item->class_name, stats->num_unflushed, __gv_loc_repl.ws_get_repl_obj_count ());
 #if !defined (NDEBUG)
       la_Debug_worker_current_stage[context->worker_idx] = LA_WORKER_STAGE_APPLY_MID_FLUSH;
 #endif /* !NDEBUG */
@@ -8459,9 +8445,13 @@ end:
 #if !defined (NDEBUG)
       la_Debug_worker_current_stage[context->worker_idx] = LA_WORKER_STAGE_APPLY;
 #endif /* !NDEBUG */
-      LA_DEBUG_LOG (ARG_FILE_LINE,
-		    "threshold_flush update END class=%s err=%d unflushed=%d pending=%d\n",
-		    item->class_name, error, stats->num_unflushed, __gv_loc_repl.ws_get_repl_obj_count ());
+      if (error != NO_ERROR)
+	{
+	  /* per-row logging demoted to error-only (log diet, 2026-08-11) */
+	  LA_DEBUG_LOG (ARG_FILE_LINE,
+			"threshold_flush update END class=%s err=%d unflushed=%d pending=%d\n",
+			item->class_name, error, stats->num_unflushed, __gv_loc_repl.ws_get_repl_obj_count ());
+	}
     }
 
 #if !defined (NDEBUG)
@@ -8593,13 +8583,6 @@ la_apply_insert_log (LA_APPLY_WORKER_CONTEXT * context, LA_ITEM * item, LA_APPLY
 #if !defined (NDEBUG)
   la_note_first_insert_activity (item);
 #endif /* !NDEBUG */
-  LA_DEBUG_LOG (ARG_FILE_LINE,
-		"worker[idx=%d tid=%lu tran=%d] insert BEGIN class=%s key=%s item_lsa=%lld|%d target_lsa=%lld|%d "
-		"pending=%d\n",
-		context->worker_idx, (unsigned long) pthread_self (), tm_Tran_index, item->class_name, sb.get_buffer (),
-		(long long) item->lsa.pageid, (int) item->lsa.offset, (long long) item->target_lsa.pageid,
-		(int) item->target_lsa.offset,
-		__gv_loc_repl.ws_get_repl_obj_count ());
 
   /* get the target log page */
   old_pageid = item->target_lsa.pageid;
@@ -8645,12 +8628,6 @@ la_apply_insert_log (LA_APPLY_WORKER_CONTEXT * context, LA_ITEM * item, LA_APPLY
       goto end;
     }
 
-  LA_DEBUG_LOG (ARG_FILE_LINE,
-		"worker[idx=%d tid=%lu tran=%d] insert recdes class=%s key=%s rcvindex=%u rec_type=%d mvcc=%d "
-		"length=%d\n",
-		context->worker_idx, (unsigned long) pthread_self (), tm_Tran_index, item->class_name, sb.get_buffer (),
-		rcvindex, recdes->type, (int) is_mvcc_class, recdes->length);
-
   if (recdes->type == REC_ASSIGN_ADDRESS || recdes->type == REC_RELOCATION)
     {
       er_log_debug (ARG_FILE_LINE, "apply_insert : rectype.type = %d\n", recdes->type);
@@ -8695,11 +8672,14 @@ la_apply_insert_log (LA_APPLY_WORKER_CONTEXT * context, LA_ITEM * item, LA_APPLY
   ATOMIC_INC_64 (&la_Debug_progress.worker_repl_obj_count_total[context->worker_idx], 1);
   LA_TIME_ACCUM_USEC (_repl_obj_begin, la_Debug_progress.worker_repl_obj_usec_total[context->worker_idx]);
 #endif /* !NDEBUG */
-  LA_DEBUG_LOG (ARG_FILE_LINE,
-		"worker[idx=%d tid=%lu tran=%d] insert add_object class=%s key=%s error=%d pending=%d\n",
-		context->worker_idx, (unsigned long) pthread_self (), tm_Tran_index, item->class_name, sb.get_buffer (),
-		error,
-		__gv_loc_repl.ws_get_repl_obj_count ());
+  if (error != NO_ERROR)
+    {
+      /* per-row logging demoted to error-only (log diet, 2026-08-11) */
+      LA_DEBUG_LOG (ARG_FILE_LINE,
+		    "worker[idx=%d tid=%lu tran=%d] insert add_object class=%s key=%s error=%d pending=%d\n",
+		    context->worker_idx, (unsigned long) pthread_self (), tm_Tran_index, item->class_name,
+		    sb.get_buffer (), error, __gv_loc_repl.ws_get_repl_obj_count ());
+    }
 
 end:
   if (error != NO_ERROR)
@@ -8714,11 +8694,6 @@ end:
 #if !defined (NDEBUG)
       la_debug_note_worker_apply_item (context->worker_idx);
 #endif /* !NDEBUG */
-      LA_DEBUG_LOG (ARG_FILE_LINE,
-		    "worker[idx=%d tid=%lu tran=%d] threshold_flush insert BEGIN class=%s key=%s "
-		    "unflushed=%d pending=%d\n",
-		    context->worker_idx, (unsigned long) pthread_self (), tm_Tran_index, item->class_name,
-		    sb.get_buffer (), stats->num_unflushed, __gv_loc_repl.ws_get_repl_obj_count ());
 #if !defined (NDEBUG)
       la_Debug_worker_current_stage[context->worker_idx] = LA_WORKER_STAGE_APPLY_MID_FLUSH;
 #endif /* !NDEBUG */
@@ -8730,18 +8705,25 @@ end:
 #if !defined (NDEBUG)
       la_Debug_worker_current_stage[context->worker_idx] = LA_WORKER_STAGE_APPLY;
 #endif /* !NDEBUG */
-      LA_DEBUG_LOG (ARG_FILE_LINE,
-		    "worker[idx=%d tid=%lu tran=%d] threshold_flush insert END class=%s key=%s "
-		    "err=%d unflushed=%d pending=%d\n",
-		    context->worker_idx, (unsigned long) pthread_self (), tm_Tran_index, item->class_name,
-		    sb.get_buffer (), error, stats->num_unflushed, __gv_loc_repl.ws_get_repl_obj_count ());
+      if (error != NO_ERROR)
+	{
+	  /* per-row logging demoted to error-only (log diet, 2026-08-11) */
+	  LA_DEBUG_LOG (ARG_FILE_LINE,
+			"worker[idx=%d tid=%lu tran=%d] threshold_flush insert END class=%s key=%s "
+			"err=%d unflushed=%d pending=%d\n",
+			context->worker_idx, (unsigned long) pthread_self (), tm_Tran_index, item->class_name,
+			sb.get_buffer (), error, stats->num_unflushed, __gv_loc_repl.ws_get_repl_obj_count ());
+	}
     }
 
-  LA_DEBUG_LOG (ARG_FILE_LINE,
-		"worker[idx=%d tid=%lu tran=%d] insert END class=%s key=%s error=%d "
-		"stats[ins=%lu fail=%lu unflushed=%d]\n",
-		context->worker_idx, (unsigned long) pthread_self (), tm_Tran_index, item->class_name, sb.get_buffer (),
-		error, stats->insert_counter, stats->fail_counter, stats->num_unflushed);
+  if (error != NO_ERROR)
+    {
+      LA_DEBUG_LOG (ARG_FILE_LINE,
+		    "worker[idx=%d tid=%lu tran=%d] insert END class=%s key=%s error=%d "
+		    "stats[ins=%lu fail=%lu unflushed=%d]\n",
+		    context->worker_idx, (unsigned long) pthread_self (), tm_Tran_index, item->class_name,
+		    sb.get_buffer (), error, stats->insert_counter, stats->fail_counter, stats->num_unflushed);
+    }
 
 #if !defined (NDEBUG)
   ATOMIC_INC_64 (&la_Debug_progress.worker_add_and_flush_count_total[context->worker_idx], 1);

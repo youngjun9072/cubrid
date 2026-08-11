@@ -6908,9 +6908,6 @@ locator_repl::locator_repl_mflush_force (LOCATOR_MFLUSH_CACHE * mflush)
       struct timeval _lrmf_begin, _lrmf_end;
       INT64 _lrmf_usec = 0;
       gettimeofday (&_lrmf_begin, NULL);
-      er_log_debug (ARG_FILE_LINE,
-		    "locator_repl_mflush_force_begin calls=%llu tid=%lu tm_tran_index=%d num_objs=%d\n",
-		    (unsigned long long) _lrmf_call_n, _lrmf_tid_os, _lrmf_tran_idx, _lrmf_num_objs);
 #endif /* !NDEBUG */
 
       error_code = locator_repl_force (mflush->copy_area, &reply_copy_area);
@@ -6919,11 +6916,15 @@ locator_repl::locator_repl_mflush_force (LOCATOR_MFLUSH_CACHE * mflush)
       gettimeofday (&_lrmf_end, NULL);
       _lrmf_usec = ((INT64) _lrmf_end.tv_sec - (INT64) _lrmf_begin.tv_sec) * 1000000LL
 		   + ((INT64) _lrmf_end.tv_usec - (INT64) _lrmf_begin.tv_usec);
-      er_log_debug (ARG_FILE_LINE,
-		    "locator_repl_mflush_force_end calls=%llu tid=%lu tm_tran_index=%d "
-		    "num_objs=%d error_code=%d elapsed_usec=%lld\n",
-		    (unsigned long long) _lrmf_call_n, _lrmf_tid_os, _lrmf_tran_idx,
-		    _lrmf_num_objs, error_code, (long long) _lrmf_usec);
+      if (error_code != NO_ERROR)
+	{
+	  /* error-only (log diet, 2026-08-11): success latency is covered by periodic stats */
+	  er_log_debug (ARG_FILE_LINE,
+			"locator_repl_mflush_force_end calls=%llu tid=%lu tm_tran_index=%d "
+			"num_objs=%d error_code=%d elapsed_usec=%lld\n",
+			(unsigned long long) _lrmf_call_n, _lrmf_tid_os, _lrmf_tran_idx,
+			_lrmf_num_objs, error_code, (long long) _lrmf_usec);
+	}
 #endif /* !NDEBUG */
 
       /* If the force failed and the system is down.. finish */
