@@ -865,6 +865,9 @@ static LA_CACHE_PB *la_init_cache_pb (void);
 static unsigned int log_pageid_hash (const void *key, unsigned int htsize);
 static int la_init_cache_log_buffer (LA_CACHE_PB * cache_pb, int slb_cnt, int slb_size);
 static int la_fetch_log_hdr (LA_ACT_LOG * act_log);
+#if !defined (NDEBUG)
+static void la_check_hdr_integrity (const char *where, const LOG_HEADER * hdr);
+#endif /* !NDEBUG */
 static int la_find_log_pagesize (LA_ACT_LOG * act_log, const char *logpath, const char *dbname, bool check_charset);
 static bool la_apply_pre (void);
 static int la_does_page_exist (LOG_PAGEID pageid);
@@ -3843,6 +3846,11 @@ la_log_fetch_from_archive (LOG_PAGEID pageid, char *data)
 log_reopen:
   if (la_Info.arv_log.log_vdes == NULL_VOLDES)
     {
+#if !defined (NDEBUG)
+      /* archive name is built from act_log.log_hdr->prefix_name; validate the buffer at the exact
+       * moment of use (catches a read-to-use scribble the fetch-time check would miss). */
+      la_check_hdr_integrity ("archive_name build", la_Info.act_log.log_hdr);
+#endif /* !NDEBUG */
       /* make archive_name */
       fileio_make_log_archive_name (la_Info.arv_log.path, la_Info.log_path, la_Info.act_log.log_hdr->prefix_name,
 				    la_Info.arv_log.arv_num);
@@ -5589,6 +5597,58 @@ la_init_cache_log_buffer (LA_CACHE_PB * cache_pb, int slb_cnt, int slb_size)
   return error;
 }
 
+#if !defined (NDEBUG)
+/* [TEMP][DO-NOT-MERGE] Buffer integrity tripwire (2026-08-11): validate the in-memory active-log
+ * header. Replaces the removed A3/C mark tripwires with a field-agnostic check - a scribble that
+ * hits prefix_name (-> garbage archive name, dead replication) OR mark_will_del (-> phantom reinit,
+ * applylogdb suicide) is caught the same way, with a callstack naming the code path that saw it.
+ * Pure logging: no behavior change, no suppression. */
+static void
+la_check_hdr_integrity (const char *where, const LOG_HEADER * hdr)
+{
+  bool magic_ok = (strncmp (hdr->magic, CUBRID_MAGIC_LOG_ACTIVE, CUBRID_MAGIC_MAX_LENGTH) == 0);
+  /* mark_will_del is a bool; a legit byte is exactly 0 or 1. Read the RAW byte (not the bool
+   * value) so a scribbled 0x7f-type byte is detected instead of being normalized to true. */
+  unsigned char mark_raw = *(const unsigned char *) &hdr->mark_will_del;
+  bool mark_ok = (mark_raw == 0 || mark_raw == 1);
+  bool prefix_ok = true;
+  size_t i;
+
+  for (i = 0; i < sizeof (hdr->prefix_name); i++)
+    {
+      char c = hdr->prefix_name[i];
+      if (c == '\0')
+	{
+	  break;
+	}
+      if (c < 0x20 || c > 0x7e)
+	{
+	  prefix_ok = false;
+	  break;
+	}
+    }
+  if (i == 0 || i >= sizeof (hdr->prefix_name))
+    {
+      prefix_ok = false;	/* empty or not NUL-terminated */
+    }
+
+  if (magic_ok && prefix_ok && mark_ok)
+    {
+      return;
+    }
+
+  er_print_callstack (ARG_FILE_LINE,
+		      "HDR CORRUPT (%s): magic_ok=%d prefix_ok=%d mark_ok=%d "
+		      "prefix=[%02x %02x %02x %02x] mark_raw=%u magic=\"%.16s\" "
+		      "db_creation=%lld db_restore=%lld append=%lld|%d\n",
+		      where, magic_ok, prefix_ok, mark_ok,
+		      (unsigned char) hdr->prefix_name[0], (unsigned char) hdr->prefix_name[1],
+		      (unsigned char) hdr->prefix_name[2], (unsigned char) hdr->prefix_name[3],
+		      mark_raw, hdr->magic, (long long) hdr->db_creation, (long long) hdr->db_restore_time,
+		      (long long) hdr->append_lsa.pageid, (int) hdr->append_lsa.offset);
+}
+#endif /* !NDEBUG */
+
 static int
 la_fetch_log_hdr (LA_ACT_LOG * act_log)
 {
@@ -5602,6 +5662,10 @@ la_fetch_log_hdr (LA_ACT_LOG * act_log)
     }
 
   act_log->log_hdr = (LOG_HEADER *) (act_log->hdr_page->area);
+
+#if !defined (NDEBUG)
+  la_check_hdr_integrity ("la_fetch_log_hdr", act_log->log_hdr);
+#endif /* !NDEBUG */
 
   return error;
 }
@@ -11759,6 +11823,11 @@ check_reinit_copylog (void)
 
   if (la_Info.act_log.log_hdr->mark_will_del)
     {
+#if !defined (NDEBUG)
+      /* mark==true: header otherwise intact => legit reinit; corrupt => phantom (scribble hit the
+       * mark_will_del byte). Log + callstack, but do NOT suppress - let the real outcome manifest. */
+      la_check_hdr_integrity ("check_reinit_copylog mark=true", la_Info.act_log.log_hdr);
+#endif /* !NDEBUG */
       la_Info.reinit_copylog = true;
       return ER_FAILED;
     }
