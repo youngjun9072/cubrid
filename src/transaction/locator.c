@@ -485,6 +485,7 @@ locator_allocate_copy_area_by_length (int min_length)
 
   copyarea->mem = (char *) copyarea + sizeof (*copyarea);
   copyarea->length = min_length;
+  copyarea->no_pool = 0;
   copyarea->dbg_state = LOCATOR_CA_STATE_INUSE;
   /* Tripwire: push the previous owner into the history ring, then stamp the new owner. */
   copyarea->dbg_owner_hist[3] = copyarea->dbg_owner_hist[2];
@@ -575,16 +576,19 @@ locator_free_copy_area (LC_COPYAREA * copyarea)
     {
       /* Tripwire: this area was already returned to the pool - double free. */
       er_log_debug (ARG_FILE_LINE,
-		    "COPYAREA DOUBLE-FREE: area %p is already pooled (owner_tid=%lu self_tid=%lu)\n",
-		    (void *) copyarea, copyarea->dbg_owner_tid, (unsigned long) pthread_self ());
+		    "COPYAREA DOUBLE-FREE: area %p is already pooled (owner_tid=%lu self_tid=%lu caller=%p"
+		    " owner_hist=[%lu,%lu,%lu,%lu])\n", (void *) copyarea, copyarea->dbg_owner_tid,
+		    (unsigned long) pthread_self (), __builtin_return_address (0), copyarea->dbg_owner_hist[0],
+		    copyarea->dbg_owner_hist[1], copyarea->dbg_owner_hist[2], copyarea->dbg_owner_hist[3]);
       fflush (NULL);
       abort ();
     }
   if (copyarea->dbg_state != LOCATOR_CA_STATE_INUSE)
     {
       /* Tripwire: freeing an area that was never handed out by the allocator. */
-      er_log_debug (ARG_FILE_LINE, "COPYAREA GUARD: free of area %p with bad state 0x%x (self_tid=%lu)\n",
-		    (void *) copyarea, copyarea->dbg_state, (unsigned long) pthread_self ());
+      er_log_debug (ARG_FILE_LINE, "COPYAREA GUARD: free of area %p with bad state 0x%x (self_tid=%lu caller=%p)\n",
+		    (void *) copyarea, copyarea->dbg_state, (unsigned long) pthread_self (),
+		    __builtin_return_address (0));
       fflush (NULL);
       abort ();
     }
@@ -592,10 +596,22 @@ locator_free_copy_area (LC_COPYAREA * copyarea)
     {
       /* Cross-thread free: may be legal in some server paths, so no abort. Logged loudly
        * because it is the prime suspect pattern for the parallel applier copyarea corruption. */
-      er_log_debug (ARG_FILE_LINE, "COPYAREA CROSS-THREAD FREE: area %p owner_tid=%lu freed by tid=%lu\n",
-		    (void *) copyarea, copyarea->dbg_owner_tid, (unsigned long) pthread_self ());
+      er_log_debug (ARG_FILE_LINE,
+		    "COPYAREA CROSS-THREAD FREE: area %p owner_tid=%lu freed by tid=%lu caller=%p"
+		    " owner_hist=[%lu,%lu,%lu,%lu]\n", (void *) copyarea, copyarea->dbg_owner_tid,
+		    (unsigned long) pthread_self (), __builtin_return_address (0), copyarea->dbg_owner_hist[0],
+		    copyarea->dbg_owner_hist[1], copyarea->dbg_owner_hist[2], copyarea->dbg_owner_hist[3]);
     }
 #endif /* !NDEBUG */
+
+  if (copyarea->no_pool)
+    {
+      /* Fix candidate: repl reply areas bypass the shared cache so that a double free
+       * surfaces as a real heap fault (ASan/glibc-visible with the culprit stack)
+       * instead of silently aliasing the pool across workers. */
+      free_and_init (copyarea);
+      return;
+    }
 
   if (LOCATOR_CACHED_COPYAREA_SIZE_LIMIT < (size_t) copyarea->length)
     {

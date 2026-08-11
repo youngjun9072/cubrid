@@ -605,6 +605,24 @@ LA_INFO la_Info;
 
 static bool la_applier_need_shutdown = false;
 static bool la_applier_shutdown_by_signal = false;
+
+/* Tripwire: record the FIRST error/site that requested shutdown, so the death
+ * trace can name the real culprit (er_errid() at la_shutdown time is often a
+ * later, unrelated notification code such as -1040). */
+static int la_shutdown_cause_error = 0;
+static int la_shutdown_cause_line = 0;
+
+#define LA_SET_NEED_SHUTDOWN() \
+  do \
+    { \
+      if (la_applier_need_shutdown == false) \
+	{ \
+	  la_shutdown_cause_error = er_errid (); \
+	  la_shutdown_cause_line = __LINE__; \
+	} \
+      la_applier_need_shutdown = true; \
+    } \
+  while (0)
 static char la_slave_db_name[DB_MAX_IDENTIFIER_LENGTH + 1];
 static char la_peer_host[CUB_MAXHOSTNAMELEN + 1];
 
@@ -1032,7 +1050,7 @@ la_shutdown_by_signal (int ignore)
     }
 #endif /* !NDEBUG */
 
-  la_applier_need_shutdown = true;
+  LA_SET_NEED_SHUTDOWN ();
   la_applier_shutdown_by_signal = true;
 }
 
@@ -2204,11 +2222,17 @@ la_apply_worker_end_session (LA_APPLY_WORKER_SESSION * session)
 
 #if defined(CS_MODE) && defined(MULTI_CONN_TO_A_SERVER)
   /* Symmetric CS-team teardown: db_shutdown_sub() -> boot_finalize_client_sub()
-   * performs net_client_sub_final + au_final + sm_final + ws_final. */
+   * performs net_client_sub_final + au_final + sm_final + ws_final.
+   *
+   * H5 fix candidate: teardown touches the same process-wide client globals that
+   * la_worker_init_mutex protects during bring-up (see the mutex comment about
+   * area_List heap corruption); it must therefore hold the same lock. */
   if (session->client_context_started)
     {
+      pthread_mutex_lock (&la_worker_init_mutex);
       (void) db_shutdown_sub ();
       session->client_context_started = false;
+      pthread_mutex_unlock (&la_worker_init_mutex);
     }
 #endif
 }
@@ -3189,7 +3213,7 @@ la_apply_worker_main (void *arg)
   error = la_apply_worker_start_session (&session, (int) (worker - la_apply_Workers));
   if (error != NO_ERROR)
     {
-      la_applier_need_shutdown = true;
+      LA_SET_NEED_SHUTDOWN ();
       goto end;
     }
 
@@ -3197,7 +3221,7 @@ la_apply_worker_main (void *arg)
   error = la_apply_worker_context_init (&worker_context, la_Info.act_log.db_iopagesize);
   if (error != NO_ERROR)
     {
-      la_applier_need_shutdown = true;
+      LA_SET_NEED_SHUTDOWN ();
       goto end;
     }
 
@@ -3346,7 +3370,7 @@ la_apply_worker_main (void *arg)
 #endif /* !NDEBUG */
       if (la_enqueue_apply_result (worker, &result) != NO_ERROR)
 	{
-	  la_applier_need_shutdown = true;
+	  LA_SET_NEED_SHUTDOWN ();
 	  break;
 	}
 #if !defined (NDEBUG)
@@ -3826,7 +3850,7 @@ log_reopen:
       error = check_reinit_copylog ();
       if (error != NO_ERROR)
 	{
-	  la_applier_need_shutdown = true;
+	  LA_SET_NEED_SHUTDOWN ();
 	  er_set_with_oserror (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_LOG_MOUNT_FAIL, 1, la_Info.arv_log.path);
 
 	  return ER_LOG_MOUNT_FAIL;
@@ -3962,7 +3986,7 @@ la_log_fetch (LOG_PAGEID pageid, LA_CACHE_BUFFER * cache_buffer)
 	  error = la_log_fetch_from_archive (pageid, (char *) &cache_buffer->logpage);
 	  if (error != NO_ERROR)
 	    {
-	      la_applier_need_shutdown = true;
+	      LA_SET_NEED_SHUTDOWN ();
 	      return error;
 	    }
 	  cache_buffer->in_archive = true;
@@ -5659,7 +5683,7 @@ la_find_log_pagesize (LA_ACT_LOG * act_log, const char *logpath, const char *dbn
       if (act_log->log_hdr->prefix_name[0] != '\0'
 	  && strncmp (act_log->log_hdr->prefix_name, dbname, strlen (dbname)) != 0)
 	{
-	  la_applier_need_shutdown = true;
+	  LA_SET_NEED_SHUTDOWN ();
 
 	  er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_LOG_PAGE_CORRUPTED, 1, 0);
 	  return ER_LOG_PAGE_CORRUPTED;
@@ -5668,7 +5692,7 @@ la_find_log_pagesize (LA_ACT_LOG * act_log, const char *logpath, const char *dbn
 	{
 	  char err_msg[ERR_MSG_SIZE];
 
-	  la_applier_need_shutdown = true;
+	  LA_SET_NEED_SHUTDOWN ();
 	  snprintf_dots_truncate (err_msg, sizeof (err_msg) - 1,
 				  "Active log file(%s) charset is not valid (%s), expecting %s.",
 				  act_log->path, lang_charset_cubrid_name ((INTL_CODESET) act_log->log_hdr->db_charset),
@@ -9748,7 +9772,7 @@ la_log_record_process (LOG_RECORD_HEADER * lrec, LOG_LSA * final, LOG_PAGE * pg_
     {
       if (lrec->type != LOG_END_OF_LOG)
 	{
-	  la_applier_need_shutdown = true;
+	  LA_SET_NEED_SHUTDOWN ();
 
 	  er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_HA_LA_INVALID_REPL_LOG_RECORD, 10, final->pageid, final->offset,
 		  lrec->forw_lsa.pageid, lrec->forw_lsa.offset, lrec->back_lsa.pageid, lrec->back_lsa.offset,
@@ -9763,7 +9787,7 @@ la_log_record_process (LOG_RECORD_HEADER * lrec, LOG_LSA * final, LOG_PAGE * pg_
       apply = la_add_apply_list (lrec->trid);
       if (apply == NULL)
 	{
-	  la_applier_need_shutdown = true;
+	  LA_SET_NEED_SHUTDOWN ();
 
 	  assert (er_errid () != NO_ERROR);
 	  error = er_errid ();
@@ -9813,7 +9837,7 @@ la_log_record_process (LOG_RECORD_HEADER * lrec, LOG_LSA * final, LOG_PAGE * pg_
       error = la_set_repl_log (pg_ptr, lrec->type, lrec->trid, final);
       if (error != NO_ERROR)
 	{
-	  la_applier_need_shutdown = true;
+	  LA_SET_NEED_SHUTDOWN ();
 	  return error;
 	}
       break;
@@ -9856,7 +9880,7 @@ la_log_record_process (LOG_RECORD_HEADER * lrec, LOG_LSA * final, LOG_PAGE * pg_
 #endif /* !NDEBUG */
 	  if (error != NO_ERROR)
 	    {
-	      la_applier_need_shutdown = true;
+	      LA_SET_NEED_SHUTDOWN ();
 	      return error;
 	    }
 
@@ -9909,7 +9933,7 @@ la_log_record_process (LOG_RECORD_HEADER * lrec, LOG_LSA * final, LOG_PAGE * pg_
 	  error = la_gate_order_push (&task.commit_lsa);
 	  if (error != NO_ERROR)
 	    {
-	      la_applier_need_shutdown = true;
+	      LA_SET_NEED_SHUTDOWN ();
 	      return error;
 	    }
 
@@ -9938,7 +9962,7 @@ la_log_record_process (LOG_RECORD_HEADER * lrec, LOG_LSA * final, LOG_PAGE * pg_
 	    }
 	  if (error != NO_ERROR)
 	    {
-	      la_applier_need_shutdown = true;
+	      LA_SET_NEED_SHUTDOWN ();
 	      return error;
 	    }
 	}
@@ -10724,8 +10748,9 @@ la_shutdown (void)
 
 	strftime (death_tstr, sizeof (death_tstr), "%m/%d/%y %H:%M:%S", localtime (&death_now));
 	fprintf (death_fp,
-		 "%s pid=%d la_shutdown: last_error=%d need_shutdown=%d by_signal=%d hb_proc_shutdown=%d "
-		 "final_lsa=%lld|%d committed_lsa=%lld|%d\n", death_tstr, (int) getpid (), er_errid (),
+		 "%s pid=%d la_shutdown: last_error=%d shutdown_cause=%d cause_line=%d need_shutdown=%d "
+		 "by_signal=%d hb_proc_shutdown=%d final_lsa=%lld|%d committed_lsa=%lld|%d\n", death_tstr,
+		 (int) getpid (), er_errid (), la_shutdown_cause_error, la_shutdown_cause_line,
 		 (int) la_applier_need_shutdown, (int) la_applier_shutdown_by_signal, (int) hb_Proc_shutdown,
 		 (long long) la_Info.final_lsa.pageid, (int) la_Info.final_lsa.offset,
 		 (long long) la_Info.committed_lsa.pageid, (int) la_Info.committed_lsa.offset);
@@ -12016,7 +12041,7 @@ la_apply_log_file (const char *database_name, const char *log_path, const int ma
 	{
 	  assert (er_errid () != NO_ERROR);
 	  error = er_errid ();
-	  la_applier_need_shutdown = true;
+	  LA_SET_NEED_SHUTDOWN ();
 	  break;
 	}
 
@@ -12046,7 +12071,7 @@ la_apply_log_file (const char *database_name, const char *log_path, const int ma
 		    }
 		  else if (error == ER_HA_LA_EXCEED_MAX_MEM_SIZE)
 		    {
-		      la_applier_need_shutdown = true;
+		      LA_SET_NEED_SHUTDOWN ();
 		      break;
 		    }
 		  else if (LA_IS_FLUSH_ERROR (error))
@@ -12056,12 +12081,12 @@ la_apply_log_file (const char *database_name, const char *log_path, const int ma
 		    }
 		  else if (error == ER_TDE_CIPHER_IS_NOT_LOADED)
 		    {
-		      la_applier_need_shutdown = true;
+		      LA_SET_NEED_SHUTDOWN ();
 		      break;
 		    }
 		  else if (error != NO_ERROR)
 		    {
-		      la_applier_need_shutdown = true;
+		      LA_SET_NEED_SHUTDOWN ();
 		      break;
 		    }
 
@@ -12076,7 +12101,7 @@ la_apply_log_file (const char *database_name, const char *log_path, const int ma
 		  error = check_reinit_copylog ();
 		  if (error != NO_ERROR)
 		    {
-		      la_applier_need_shutdown = true;
+		      LA_SET_NEED_SHUTDOWN ();
 		      break;
 		    }
 
@@ -12243,7 +12268,7 @@ la_apply_log_file (const char *database_name, const char *log_path, const int ma
 
 	      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_LOG_PAGE_CORRUPTED, 1, la_Info.final_lsa.pageid);
 	      error = ER_LOG_PAGE_CORRUPTED;
-	      la_applier_need_shutdown = true;
+	      LA_SET_NEED_SHUTDOWN ();
 	      break;
 	    }
 	  else
@@ -12419,7 +12444,7 @@ la_apply_log_file (const char *database_name, const char *log_path, const int ma
 		    }
 		  else if (error == ER_HA_LA_EXCEED_MAX_MEM_SIZE)
 		    {
-		      la_applier_need_shutdown = true;
+		      LA_SET_NEED_SHUTDOWN ();
 		      break;
 		    }
 		  else if (LA_IS_FLUSH_ERROR (error))
@@ -12496,7 +12521,7 @@ la_apply_log_file (const char *database_name, const char *log_path, const int ma
 	  error = la_check_mem_size ();
 	  if (error == ER_HA_LA_EXCEED_MAX_MEM_SIZE)
 	    {
-	      la_applier_need_shutdown = true;
+	      LA_SET_NEED_SHUTDOWN ();
 	      break;
 	    }
 
@@ -12509,7 +12534,7 @@ la_apply_log_file (const char *database_name, const char *log_path, const int ma
 	    }
 	  else if (error != NO_ERROR)
 	    {
-	      la_applier_need_shutdown = true;
+	      LA_SET_NEED_SHUTDOWN ();
 	      break;
 	    }
 
@@ -12554,7 +12579,7 @@ la_apply_log_file (const char *database_name, const char *log_path, const int ma
 	      la_shutdown ();
 	      return error;
 	    }
-	  la_applier_need_shutdown = true;
+	  LA_SET_NEED_SHUTDOWN ();
 	  break;
 	}
     }

@@ -6931,6 +6931,11 @@ locator_repl::locator_repl_mflush_force (LOCATOR_MFLUSH_CACHE * mflush)
 	  || ((error_code != NO_ERROR && error_code != ER_LC_PARTIALLY_FAILED_TO_FLUSH)
 	      && !BOOT_IS_CLIENT_RESTARTED ()))
 	{
+	  /* Leak fix: the early return used to skip the reply release below. */
+	  if (reply_copy_area != NULL)
+	    {
+	      locator_free_copy_area (reply_copy_area);
+	    }
 	  return error_code;
 	}
 

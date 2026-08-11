@@ -2767,6 +2767,10 @@ net_client_request_3_data_recv_copyarea (int request, char *argbuf, int argsize,
 							 content_size);
       if (*reply_copy_area != NULL)
 	{
+	  /* repl reply: bypass the locator_Keep cache on free (see locator_free_copy_area).
+	   * This function is reached only via locator_repl_force. */
+	  (*reply_copy_area)->no_pool = 1;
+
 	  if (packed_desc != NULL && packed_desc_size > 0)
 	    {
 	      __gv_cvar.css_queue_receive_data_buffer (rid, packed_desc, packed_desc_size);
@@ -2775,6 +2779,8 @@ net_client_request_3_data_recv_copyarea (int request, char *argbuf, int argsize,
 		{
 		  COMPARE_AND_FREE_BUFFER (packed_desc, reply);
 		  free_and_init (packed_desc);
+		  locator_free_copy_area (*reply_copy_area);
+		  *reply_copy_area = NULL;
 		  return set_server_error (error);
 		}
 	      else
@@ -2796,6 +2802,8 @@ net_client_request_3_data_recv_copyarea (int request, char *argbuf, int argsize,
 		    {
 		      free_and_init (packed_desc);
 		    }
+		  locator_free_copy_area (*reply_copy_area);
+		  *reply_copy_area = NULL;
 		  return set_server_error (error);
 		}
 	    }
