@@ -3182,6 +3182,7 @@ la_apply_worker_main (void *arg)
   bool worker_context_started = false;
   int error = NO_ERROR;
   unsigned long long worker_applied_item_count = 0;
+  const char *exit_reason = "normal_shutdown";
 
   er_context_p = new cuberr::context ();
   er_context_p->register_thread_local ();
@@ -3189,6 +3190,7 @@ la_apply_worker_main (void *arg)
   error = la_apply_worker_start_session (&session, (int) (worker - la_apply_Workers));
   if (error != NO_ERROR)
     {
+      exit_reason = "start_session_failed";
       la_applier_need_shutdown = true;
       goto end;
     }
@@ -3197,6 +3199,7 @@ la_apply_worker_main (void *arg)
   error = la_apply_worker_context_init (&worker_context, la_Info.act_log.db_iopagesize);
   if (error != NO_ERROR)
     {
+      exit_reason = "worker_context_init_failed";
       la_applier_need_shutdown = true;
       goto end;
     }
@@ -3346,6 +3349,7 @@ la_apply_worker_main (void *arg)
 #endif /* !NDEBUG */
       if (la_enqueue_apply_result (worker, &result) != NO_ERROR)
 	{
+	  exit_reason = "result_enqueue_failed";
 	  la_applier_need_shutdown = true;
 	  break;
 	}
@@ -3359,6 +3363,10 @@ la_apply_worker_main (void *arg)
     }
 
 end:
+  er_log_debug (ARG_FILE_LINE, "ws_worker exit worker=%d reason=%s error=%d applied=%llu shutdown=%d need_shutdown=%d\n",
+		(int) (worker - la_apply_Workers), exit_reason, error, worker_applied_item_count,
+		(int) worker->shutdown, (int) la_applier_need_shutdown);
+
   if (worker_context_started)
     {
       la_apply_worker_context_final (&worker_context);
@@ -11714,6 +11722,21 @@ check_reinit_copylog (void)
   return NO_ERROR;
 }
 
+/*
+ * la_log_reader_exit() - leave an explicit trace of why the reader (main apply
+ *   loop) is terminating. Every error-driven exit path used to leave only the
+ *   underlying er_set of the failing call, which made post-mortem analysis of
+ *   silent applylogdb deaths impossible once the error log rotated.
+ */
+static void
+la_log_reader_exit (const char *reason, int error)
+{
+  er_log_debug (ARG_FILE_LINE,
+		"ws_reader exit reason=%s error=%d final_lsa=%lld|%d committed_lsa=%lld|%d\n",
+		reason, error, (long long) la_Info.final_lsa.pageid, (int) la_Info.final_lsa.offset,
+		(long long) la_Info.committed_lsa.pageid, (int) la_Info.committed_lsa.offset);
+}
+
 static inline void
 la_set_slave_db_name (char *dest, const char *src)
 {
@@ -11971,6 +11994,7 @@ la_apply_log_file (const char *database_name, const char *log_path, const int ma
 	{
 	  assert (er_errid () != NO_ERROR);
 	  error = er_errid ();
+	  la_log_reader_exit ("apply_pre_failed", error);
 	  la_applier_need_shutdown = true;
 	  break;
 	}
@@ -11994,6 +12018,10 @@ la_apply_log_file (const char *database_name, const char *log_path, const int ma
 		    }
 
 		  error = la_collect_apply_results ();
+		  if (error != NO_ERROR)
+		    {
+		      la_log_reader_exit ("collect_apply_results", error);
+		    }
 		  if (error == ER_NET_CANT_CONNECT_SERVER)
 		    {
 		      la_shutdown ();
@@ -12130,6 +12158,7 @@ la_apply_log_file (const char *database_name, const char *log_path, const int ma
 		  error = la_log_commit (false);
 		  if (ER_IS_SERVER_DOWN_ERROR (error) || LA_IS_FLUSH_ERROR (error))
 		    {
+		      la_log_reader_exit ("log_commit", error);
 		      la_shutdown ();
 		      return error;
 		    }
@@ -12369,16 +12398,19 @@ la_apply_log_file (const char *database_name, const char *log_path, const int ma
 		{
 		  if (ER_IS_SERVER_DOWN_ERROR (error))
 		    {
+		      la_log_reader_exit ("log_record_process_server_down", error);
 		      la_shutdown ();
 		      return ER_NET_CANT_CONNECT_SERVER;
 		    }
 		  else if (error == ER_HA_LA_EXCEED_MAX_MEM_SIZE)
 		    {
+		      la_log_reader_exit ("log_record_process_exceed_max_mem", error);
 		      la_applier_need_shutdown = true;
 		      break;
 		    }
 		  else if (LA_IS_FLUSH_ERROR (error))
 		    {
+		      la_log_reader_exit ("log_record_process_flush_error", error);
 		      la_shutdown ();
 		      return error;
 		    }
@@ -12504,6 +12536,7 @@ la_apply_log_file (const char *database_name, const char *log_path, const int ma
       error = la_collect_apply_results ();
       if (error != NO_ERROR)
 	{
+	  la_log_reader_exit ("final_collect_apply_results", error);
 	  if (ER_IS_SERVER_DOWN_ERROR (error) || LA_IS_FLUSH_ERROR (error))
 	    {
 	      la_shutdown ();
