@@ -25,6 +25,9 @@
 
 #if !defined (WINDOWS)
 #include <unistd.h>
+#if !defined (WINDOWS)
+#include <sys/mman.h>
+#endif /* !WINDOWS */
 #endif
 #include <errno.h>
 #include <fcntl.h>
@@ -1148,6 +1151,59 @@ la_force_shutdown (void)
 {
   return (la_applier_need_shutdown || la_applier_shutdown_by_signal) ? true : false;
 }
+
+#if !defined (NDEBUG) && !defined (WINDOWS)
+/* hdr_page guard: the active-log header buffer has been observed corrupted in
+ * memory (prefix_name emptied -> "_lgar000" mount livelock, mark_will_del
+ * flipping true -> spurious reinit shutdown) while the on-disk header stayed
+ * intact. The buffer is process-local, so the stray writer must be one of our
+ * own threads. Keep the buffer PROT_READ except inside the legitimate refresh
+ * paths; any stray write then faults immediately and the core's backtrace
+ * points at the culprit. Enabled only when LA_HDR_PAGE_GUARD=1. */
+static size_t la_Hdr_page_guard_size = 0;
+
+static bool
+la_hdr_page_guard_on (void)
+{
+  static int enabled = -1;
+
+  if (enabled < 0)
+    {
+      const char *env = getenv ("LA_HDR_PAGE_GUARD");
+
+      enabled = (env != NULL && env[0] == '1') ? 1 : 0;
+    }
+  return enabled == 1;
+}
+
+static LOG_PAGE *
+la_hdr_page_alloc (size_t size)
+{
+  if (la_hdr_page_guard_on ())
+    {
+      size_t pgsz = (size_t) sysconf (_SC_PAGESIZE);
+      size_t rounded = ((size + pgsz - 1) / pgsz) * pgsz;
+      void *p = NULL;
+
+      if (posix_memalign (&p, pgsz, rounded) != 0)
+	{
+	  return NULL;
+	}
+      la_Hdr_page_guard_size = rounded;
+      return (LOG_PAGE *) p;
+    }
+  return (LOG_PAGE *) malloc (size);
+}
+
+static void
+la_hdr_page_set_writable (LOG_PAGE * page, bool writable)
+{
+  if (la_hdr_page_guard_on () && page != NULL && la_Hdr_page_guard_size > 0)
+    {
+      (void) mprotect (page, la_Hdr_page_guard_size, writable ? (PROT_READ | PROT_WRITE) : PROT_READ);
+    }
+}
+#endif /* !NDEBUG && !WINDOWS */
 
 static void
 la_apply_worker_init (LA_APPLY_WORKER * worker)
@@ -5578,7 +5634,13 @@ la_fetch_log_hdr (LA_ACT_LOG * act_log)
 {
   int error = NO_ERROR;
 
+#if !defined (NDEBUG) && !defined (WINDOWS)
+  la_hdr_page_set_writable (act_log->hdr_page, true);
+#endif
   error = la_log_io_read (act_log->path, act_log->log_vdes, (void *) act_log->hdr_page, 0, act_log->db_logpagesize);
+#if !defined (NDEBUG) && !defined (WINDOWS)
+  la_hdr_page_set_writable (act_log->hdr_page, false);
+#endif
   if (error != NO_ERROR)
     {
       er_set (ER_FATAL_ERROR_SEVERITY, ARG_FILE_LINE, ER_LOG_READ, 3, 0, 0, act_log->path);
@@ -5625,7 +5687,11 @@ la_find_log_pagesize (LA_ACT_LOG * act_log, const char *logpath, const char *dbn
       return error;
     }
 
+#if !defined (NDEBUG) && !defined (WINDOWS)
+  act_log->hdr_page = la_hdr_page_alloc (LA_DEFAULT_LOG_PAGE_SIZE);
+#else
   act_log->hdr_page = (LOG_PAGE *) malloc (LA_DEFAULT_LOG_PAGE_SIZE);
+#endif
   if (act_log->hdr_page == NULL)
     {
       er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_OUT_OF_VIRTUAL_MEMORY, 1, LA_DEFAULT_LOG_PAGE_SIZE);
@@ -5708,10 +5774,32 @@ la_find_log_pagesize (LA_ACT_LOG * act_log, const char *logpath, const char *dbn
     }
   else if (act_log->db_logpagesize > LA_DEFAULT_LOG_PAGE_SIZE)
     {
-      act_log->hdr_page = (LOG_PAGE *) realloc (act_log->hdr_page, act_log->db_logpagesize);
+#if !defined (NDEBUG) && !defined (WINDOWS)
+      if (la_hdr_page_guard_on ())
+	{
+	  /* realloc would break the page alignment the guard depends on */
+	  LOG_PAGE *new_page = la_hdr_page_alloc (act_log->db_logpagesize);
+
+	  if (new_page == NULL)
+	    {
+	      return ER_OUT_OF_VIRTUAL_MEMORY;
+	    }
+	  memcpy (new_page, act_log->hdr_page, LA_DEFAULT_LOG_PAGE_SIZE);
+	  free (act_log->hdr_page);
+	  act_log->hdr_page = new_page;
+	}
+      else
+#endif
+	{
+	  act_log->hdr_page = (LOG_PAGE *) realloc (act_log->hdr_page, act_log->db_logpagesize);
+	}
       act_log->log_hdr = (LOG_HEADER *) act_log->hdr_page->area;
     }
 
+#if !defined (NDEBUG) && !defined (WINDOWS)
+  /* From here on the only legitimate writer is la_fetch_log_hdr: seal it. */
+  la_hdr_page_set_writable (act_log->hdr_page, false);
+#endif
   return error;
 }
 
@@ -10777,6 +10865,10 @@ la_shutdown (void)
 
   if (la_Info.act_log.hdr_page)
     {
+#if !defined (NDEBUG) && !defined (WINDOWS)
+      /* free() writes allocator metadata into the block; unseal first */
+      la_hdr_page_set_writable (la_Info.act_log.hdr_page, true);
+#endif
       free_and_init (la_Info.act_log.hdr_page);
     }
 
