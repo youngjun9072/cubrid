@@ -28,6 +28,9 @@
 #include <errno.h>
 #if !defined(WINDOWS)
 #include <dirent.h>
+#if !defined (WINDOWS)
+#include <sys/stat.h>
+#endif /* !WINDOWS */
 #ifdef UNSTABLE_TDE_FOR_REPLICATION_LOG
 #include "sys/socket.h"
 #include "sys/un.h"
@@ -987,6 +990,32 @@ logwr_writev_append_pages (LOG_PAGE ** to_flush, DKNPAGES npages)
 	      log_pgptr = buf_pgptr;
 	    }
 #endif /* UNSTABLE_TDE_FOR_REPLICATION_LOG */
+#if !defined (NDEBUG) && !defined (WINDOWS)
+	  /* Tripwire for the transient page-0 corruption seen by applylogdb:
+	   * a data page must never target physical page 0 (the header slot)
+	   * nor land beyond the active region. Dump every input of the offset
+	   * computation at the exact write that goes wrong. */
+	  if (phy_pageid + i == 0 || phy_pageid + i > logwr_Gl.hdr.npages)
+	    {
+	      struct stat fd_st, path_st;
+	      bool inode_match;
+
+	      memset (&fd_st, 0, sizeof (fd_st));
+	      memset (&path_st, 0, sizeof (path_st));
+	      inode_match = (fstat (logwr_Gl.append_vdes, &fd_st) == 0 && stat (logwr_Gl.active_name, &path_st) == 0
+			     && fd_st.st_ino == path_st.st_ino && fd_st.st_dev == path_st.st_dev);
+
+	      er_log_debug (ARG_FILE_LINE,
+			    "logwr_page0 TRIPWIRE(data-append) phy=%lld i=%d batch_fpageid=%lld page_lpageid=%lld "
+			    "hdr.fpageid=%lld region_npages=%d nxarv_num=%d vdes=%d inode_match=%d "
+			    "bgarv(vdes=%d start=%lld cur=%lld)\n",
+			    (long long) (phy_pageid + i), i, (long long) fpageid,
+			    (long long) log_pgptr->hdr.logical_pageid, (long long) logwr_Gl.hdr.fpageid,
+			    logwr_Gl.hdr.npages, logwr_Gl.hdr.nxarv_num, logwr_Gl.append_vdes, (int) inode_match,
+			    logwr_Gl.bg_archive_info.vdes, (long long) logwr_Gl.bg_archive_info.start_page_id,
+			    (long long) logwr_Gl.bg_archive_info.current_page_id);
+	    }
+#endif /* !NDEBUG && !WINDOWS */
 	  if (fileio_write (NULL, logwr_Gl.append_vdes, log_pgptr, phy_pageid + i, LOG_PAGESIZE, write_mode) == NULL)
 	    {
 	      if (er_errid () == ER_IO_WRITE_OUT_OF_SPACE)
@@ -1228,6 +1257,27 @@ logwr_flush_header_page (void)
   logical_pageid = LOGPB_HEADER_PAGE_ID;
   phy_pageid = logwr_to_physical_pageid (logical_pageid);
 
+#if !defined (NDEBUG) && !defined (WINDOWS)
+  /* Tripwire: whatever we are about to stamp on the header slot must look
+   * like a valid active-log header. A wrong magic means logwr_Gl.hdr itself
+   * is corrupted in this process; mark_will_del==true is legitimate only on
+   * the reinit path, so logging it doubles as the writer-side ground truth
+   * of "who set the mark, when". */
+  {
+    LOG_HEADER *w_hdr = (LOG_HEADER *) logwr_Gl.loghdr_pgptr->area;
+
+    if (phy_pageid != 0 || strncmp (w_hdr->magic, CUBRID_MAGIC_LOG_ACTIVE, CUBRID_MAGIC_MAX_LENGTH) != 0
+	|| w_hdr->mark_will_del)
+      {
+	er_log_debug (ARG_FILE_LINE,
+		      "logwr_page0 TRIPWIRE(header-flush) phy=%lld magic=\"%.25s\" mark=%d prefix=\"%.18s\" "
+		      "fpageid=%lld nxarv_num=%d\n",
+		      (long long) phy_pageid, w_hdr->magic, (int) w_hdr->mark_will_del, w_hdr->prefix_name,
+		      (long long) w_hdr->fpageid, w_hdr->nxarv_num);
+      }
+  }
+#endif /* !NDEBUG && !WINDOWS */
+
   /* logwr_Gl.append_vdes is only changed while starting or finishing or recovering server. So, log cs is not needed. */
   if (fileio_write (NULL, logwr_Gl.append_vdes, logwr_Gl.loghdr_pgptr, phy_pageid, LOG_PAGESIZE,
 		    FILEIO_WRITE_NO_COMPENSATE_WRITE) == NULL
@@ -1292,6 +1342,14 @@ logwr_archive_active_log (void)
   BACKGROUND_ARCHIVING_INFO *bg_arv_info;
 
   aligned_log_pgbuf = PTR_ALIGN (log_pgbuf, MAX_ALIGNMENT);
+
+#if !defined (NDEBUG)
+  /* Anchor: pairs with the existing ER_LOG_ARCHIVE_CREATED completion log so
+   * the archiving window can be correlated with applylogdb-side anomalies. */
+  er_log_debug (ARG_FILE_LINE, "logwr_archive_active_log BEGIN arv_num=%d last_arv_fpageid=%lld eof=%lld|%d\n",
+		logwr_Gl.last_arv_num, (long long) logwr_Gl.last_arv_fpageid,
+		(long long) logwr_Gl.hdr.eof_lsa.pageid, (int) logwr_Gl.hdr.eof_lsa.offset);
+#endif /* !NDEBUG */
 
   /* Create the archive header page */
   malloc_arv_hdr_pgptr = (LOG_PAGE *) malloc (LOG_PAGESIZE);
