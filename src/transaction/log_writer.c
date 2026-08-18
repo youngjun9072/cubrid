@@ -231,6 +231,40 @@ logwr_to_physical_pageid (LOG_PAGEID logical_pageid)
   return phy_pageid;
 }
 
+#if !defined (NDEBUG) && !defined (WINDOWS)
+/*
+ * logwr_tripwire_bgarv_write - background archiving is the only write path
+ *   for which small physical offsets (including 0) are legitimate, so a vdes
+ *   mixup here drops archive content exactly onto the active log's header
+ *   slot - the transient page-0 corruption applylogdb keeps reading. Verify
+ *   at every bgarv write that the descriptor is not the active log's and
+ *   still resolves to the bg archive file.
+ */
+static void
+logwr_tripwire_bgarv_write (const char *site, LOG_PHY_PAGEID phy_pageid, int npages, LOG_PAGEID lpageid)
+{
+  BACKGROUND_ARCHIVING_INFO *bg = &logwr_Gl.bg_archive_info;
+  struct stat fd_st, path_st;
+  bool inode_match;
+  bool fd_clash = (bg->vdes == logwr_Gl.append_vdes);
+
+  memset (&fd_st, 0, sizeof (fd_st));
+  memset (&path_st, 0, sizeof (path_st));
+  inode_match = (fstat (bg->vdes, &fd_st) == 0 && stat (logwr_Gl.bg_archive_name, &path_st) == 0
+		 && fd_st.st_ino == path_st.st_ino && fd_st.st_dev == path_st.st_dev);
+
+  if (fd_clash || !inode_match)
+    {
+      er_log_debug (ARG_FILE_LINE,
+		    "logwr_page0 TRIPWIRE(bgarv-%s) fd_clash=%d inode_match=%d bg_vdes=%d append_vdes=%d "
+		    "phy=%lld npages=%d lpageid=%lld fd_ino=%llu path_ino=%llu\n",
+		    site, (int) fd_clash, (int) inode_match, bg->vdes, logwr_Gl.append_vdes,
+		    (long long) phy_pageid, npages, (long long) lpageid,
+		    (unsigned long long) fd_st.st_ino, (unsigned long long) path_st.st_ino);
+    }
+}
+#endif /* !NDEBUG && !WINDOWS */
+
 /*
  * logwr_fetch_header_page -
  *
@@ -818,6 +852,9 @@ logwr_copy_necessary_log (LOG_PAGEID to_pageid)
 	    }
 	}
       /* no need to encrypt, it is read as not decrypted (TDE) if encrypted */
+#if !defined (NDEBUG) && !defined (WINDOWS)
+      logwr_tripwire_bgarv_write ("prefetch", ar_phy_pageid, num_pages, pageid);
+#endif
       if (fileio_write_pages (NULL, bg_arv_info->vdes, (char *) log_pgptr, ar_phy_pageid, num_pages, LOG_PAGESIZE,
 			      FILEIO_WRITE_DEFAULT_WRITE) == NULL)
 	{
@@ -925,6 +962,9 @@ logwr_writev_append_pages (LOG_PAGE ** to_flush, DKNPAGES npages)
 		  log_pgptr = buf_pgptr;
 		}
 #endif /* UNSTABLE_TDE_FOR_REPLICATION_LOG */
+#if !defined (NDEBUG) && !defined (WINDOWS)
+	      logwr_tripwire_bgarv_write ("append", phy_pageid + i, 1, log_pgptr->hdr.logical_pageid);
+#endif
 	      if (fileio_write (NULL, bg_arv_info->vdes, log_pgptr, phy_pageid + i, LOG_PAGESIZE, write_mode) == NULL)
 		{
 		  if (er_errid () == ER_IO_WRITE_OUT_OF_SPACE)
@@ -1205,6 +1245,9 @@ logwr_flush_bgarv_header_page (void)
 
   phy_pageid = logwr_to_physical_pageid (log_pgptr->hdr.logical_pageid);
 
+#if !defined (NDEBUG) && !defined (WINDOWS)
+  logwr_tripwire_bgarv_write ("header", phy_pageid, 1, logical_pageid);
+#endif
   if (fileio_write (NULL, bg_arv_info->vdes, log_pgptr, phy_pageid, LOG_PAGESIZE,
 		    FILEIO_WRITE_NO_COMPENSATE_WRITE) == NULL
       || fileio_synchronize (NULL, bg_arv_info->vdes, logwr_Gl.bg_archive_name, false) == NULL_VOLDES)
