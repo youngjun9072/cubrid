@@ -25,9 +25,7 @@
 
 #if !defined (WINDOWS)
 #include <unistd.h>
-#if !defined (WINDOWS)
 #include <sys/mman.h>
-#endif /* !WINDOWS */
 #endif
 #include <errno.h>
 #include <fcntl.h>
@@ -5648,6 +5646,63 @@ la_fetch_log_hdr (LA_ACT_LOG * act_log)
     }
 
   act_log->log_hdr = (LOG_HEADER *) (act_log->hdr_page->area);
+
+#if !defined (NDEBUG) && !defined (WINDOWS)
+  /* Discriminators for the spurious mark_will_del / emptied-prefix_name events:
+   * every incident so far read a corrupted-looking header through this fetch
+   * while the on-disk header stayed intact and the mprotect guard stayed
+   * silent (nobody trampled the buffer). Judge on the spot, at the very read
+   * that goes wrong:
+   *   - wrong CONTENT: the magic must be CUBRID/LogActive
+   *   - wrong FILE:    the fd must still resolve to act_log->path (inode match
+   *                    busts a hijacked/reused descriptor)
+   *   - transient?:    re-read through a FRESH fd = ground truth of the disk */
+  if (strncmp (act_log->log_hdr->magic, CUBRID_MAGIC_LOG_ACTIVE, CUBRID_MAGIC_MAX_LENGTH) != 0
+      || act_log->log_hdr->mark_will_del)
+    {
+      struct stat fd_st, path_st;
+      bool inode_match;
+
+      memset (&fd_st, 0, sizeof (fd_st));
+      memset (&path_st, 0, sizeof (path_st));
+      inode_match = (fstat (act_log->log_vdes, &fd_st) == 0 && stat (act_log->path, &path_st) == 0
+		     && fd_st.st_ino == path_st.st_ino && fd_st.st_dev == path_st.st_dev);
+
+      er_log_debug (ARG_FILE_LINE,
+		    "hdr_fetch ANOMALY magic=\"%.25s\" mark=%d inode_match=%d fd=%d fd_ino=%llu path_ino=%llu "
+		    "prefix=\"%.18s\" fpageid=%lld nxarv_num=%d\n",
+		    act_log->log_hdr->magic, (int) act_log->log_hdr->mark_will_del, (int) inode_match,
+		    act_log->log_vdes, (unsigned long long) fd_st.st_ino, (unsigned long long) path_st.st_ino,
+		    act_log->log_hdr->prefix_name, (long long) act_log->log_hdr->fpageid,
+		    act_log->log_hdr->nxarv_num);
+
+      {
+	LOG_PAGE *re_page = (LOG_PAGE *) malloc (act_log->db_logpagesize);
+	int re_vdes = fileio_open (act_log->path, O_RDONLY, 0);
+
+	if (re_page != NULL && re_vdes != NULL_VOLDES
+	    && la_log_io_read (act_log->path, re_vdes, (void *) re_page, 0, act_log->db_logpagesize) == NO_ERROR)
+	  {
+	    LOG_HEADER *re_hdr = (LOG_HEADER *) (re_page->area);
+
+	    er_log_debug (ARG_FILE_LINE,
+			  "hdr_fetch REREAD(fresh fd) magic=\"%.25s\" mark=%d prefix=\"%.18s\" verdict=%s\n",
+			  re_hdr->magic, (int) re_hdr->mark_will_del, re_hdr->prefix_name,
+			  (re_hdr->mark_will_del == act_log->log_hdr->mark_will_del
+			   && strncmp (re_hdr->magic, act_log->log_hdr->magic, CUBRID_MAGIC_MAX_LENGTH) == 0)
+			  ? "disk-really-carries-it" : "wrong-read(transient/hijack)");
+	  }
+	if (re_vdes != NULL_VOLDES)
+	  {
+	    fileio_close (re_vdes);
+	  }
+	if (re_page != NULL)
+	  {
+	    free (re_page);
+	  }
+      }
+    }
+#endif /* !NDEBUG && !WINDOWS */
 
   return error;
 }
