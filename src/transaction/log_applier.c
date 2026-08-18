@@ -3629,18 +3629,30 @@ la_log_io_read_with_max_retries (char *vname, int vdes, void *io_pgptr, LOG_PHY_
   off64_t offset = ((off64_t) pagesize) * ((off64_t) pageid);
   char *current_ptr = (char *) io_pgptr;
 
+#if defined (WINDOWS)
   if (lseek64 (vdes, offset, SEEK_SET) == -1)
     {
       er_set_with_oserror (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_IO_READ, 2, pageid, vname);
       return ER_FAILED;
     }
+#endif /* WINDOWS */
 
   while (remain_bytes > 0 && retries != 0)
     {
       retries = (retries > 0) ? retries - 1 : retries;
 
-      /* Read the desired page */
+      /* Read the desired page.
+       * The reader and the apply workers share this descriptor (act/arv log),
+       * and the file offset lives on the descriptor: the historical
+       * lseek64+read pair let one thread's seek redirect another thread's
+       * read, so the header fetch could return an arbitrary data page
+       * (spurious mark_will_del reinit, emptied prefix_name -> "_lgar000"
+       * mount livelock). pread keeps the offset local to each call. */
+#if defined (WINDOWS)
       nbytes = read (vdes, current_ptr, remain_bytes);
+#else
+      nbytes = (int) pread64 (vdes, current_ptr, remain_bytes, offset);
+#endif
 
       if (nbytes == 0)
 	{
@@ -3668,6 +3680,7 @@ la_log_io_read_with_max_retries (char *vname, int vdes, void *io_pgptr, LOG_PHY_
 
       remain_bytes -= nbytes;
       current_ptr += nbytes;
+      offset += nbytes;
     }
 
   if (remain_bytes > 0)
