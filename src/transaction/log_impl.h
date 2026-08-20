@@ -476,6 +476,26 @@ struct log_rcv_tdes
 #ifndef _LOG_WRITESET_HASH_DEFINED_
 #define _LOG_WRITESET_HASH_DEFINED_
 typedef UINT64 LOG_WRITESET_HASH;
+
+/* A collected key is either written or only referenced by this transaction.
+ * WRITE: this transaction wrote the row that owns the key (PK or UNIQUE).
+ * REF: this transaction only pointed at the key through a foreign key value.
+ * Both kinds probe the global commit history so the transaction waits behind
+ * whoever last wrote the key, but only WRITE keys are published back into the
+ * history. Publishing a reference would chain sibling children that point at the
+ * same parent behind one another for no reason. */
+typedef enum
+{
+  LOG_WRITESET_KIND_WRITE = 0,
+  LOG_WRITESET_KIND_REF = 1
+} LOG_WRITESET_KIND;
+
+typedef struct log_writeset_entry LOG_WRITESET_ENTRY;
+struct log_writeset_entry
+{
+  LOG_WRITESET_HASH hash;
+  LOG_WRITESET_KIND kind;
+};
 #endif /* _LOG_WRITESET_HASH_DEFINED_ */
 
 typedef struct log_tdes LOG_TDES;
@@ -539,7 +559,7 @@ struct log_tdes
 
   /* writeset PoC: per-transaction writeset-key hashes (tdes-lifetime).
    * MySQL Rpl_transaction_write_set_ctx::write_set 와 동형인 벡터(리스트). */
-  std::vector < LOG_WRITESET_HASH > ws_hashes;	/* collected writeset key hashes */
+  std::vector < LOG_WRITESET_ENTRY > ws_hashes;	/* collected writeset key hashes (WRITE + FK REF) */
   bool ws_overflow;		/* set when size exceeds per-tx limit; writeset dropped (= MySQL has_missing_keys) */
   LOG_LSA ws_dependency_seq;	/* commit-time dependency label = min (prev commit, writeset parent) */
 

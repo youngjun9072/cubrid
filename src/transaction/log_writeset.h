@@ -42,7 +42,30 @@ typedef struct log_tdes LOG_TDES;
 #ifndef _LOG_WRITESET_HASH_DEFINED_
 #define _LOG_WRITESET_HASH_DEFINED_
 typedef UINT64 LOG_WRITESET_HASH;
+
+/* A collected key is either written or only referenced by this transaction.
+ * WRITE: this transaction wrote the row that owns the key (PK or UNIQUE).
+ * REF: this transaction only pointed at the key through a foreign key value.
+ * Both kinds probe the global commit history so the transaction waits behind
+ * whoever last wrote the key, but only WRITE keys are published back into the
+ * history. Publishing a reference would chain sibling children that point at the
+ * same parent behind one another for no reason. */
+typedef enum
+{
+  LOG_WRITESET_KIND_WRITE = 0,
+  LOG_WRITESET_KIND_REF = 1
+} LOG_WRITESET_KIND;
+
+typedef struct log_writeset_entry LOG_WRITESET_ENTRY;
+struct log_writeset_entry
+{
+  LOG_WRITESET_HASH hash;
+  LOG_WRITESET_KIND kind;
+};
 #endif /* _LOG_WRITESET_HASH_DEFINED_ */
+
+/* forward declaration of value domain (defined in object_domain.h) */
+struct tp_domain;
 
 /* per-transaction distinct-key limit and global history capacity.
  *
@@ -92,6 +115,8 @@ extern void log_writeset_history_finalize (void);
 extern int log_writeset_add_key (THREAD_ENTRY * thread_p, LOG_TDES * tdes, const OID * class_oid,
 				 const char *packed, int len);
 extern int log_writeset_add_dbvalue (THREAD_ENTRY * thread_p, LOG_TDES * tdes, const OID * class_oid, DB_VALUE * pk);
+extern int log_writeset_add_ref_dbvalue (THREAD_ENTRY * thread_p, LOG_TDES * tdes, const OID * ref_class_oid,
+					 DB_VALUE * fk_value, struct tp_domain *parent_pk_domain);
 extern void log_writeset_commit_probe (THREAD_ENTRY * thread_p, LOG_TDES * tdes, LOG_LSA * ws_parent_out);
 extern void log_writeset_commit_flush (THREAD_ENTRY * thread_p, LOG_TDES * tdes, const LOG_LSA * commit_lsa);
 

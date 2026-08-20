@@ -42,6 +42,7 @@
 #include "dmalloc.h"
 #endif /* DMALLOC */
 #include "error_manager.h"
+#include "btree.h"
 #include "deduplicate_key.h"
 #include "fetch.h"
 #include "filter_pred_cache.h"
@@ -7778,6 +7779,71 @@ locator_add_or_remove_index_for_moving (THREAD_ENTRY * thread_p, RECDES * recdes
 }
 
 /*
+ * locator_writeset_collect_fk_ref () - collect a foreign-key reference hash for the writeset
+ *
+ * return: void
+ *
+ *   index(in): the child table's foreign-key index
+ *   btid_index(in): the index position within the attribute info
+ *   attrinfo(in): attribute info holding this row's index values
+ *   recdes(in): the row record (new row for insert, old row for delete)
+ *   inst_oid(in): the row's OID
+ *
+ * Note: Orders this transaction behind the parent row that owns the referenced primary key by
+ *       reproducing the parent's write hash from the child's foreign-key value. The value is read
+ *       with the deduplicate column removed (as the master's own foreign-key check does) and packed
+ *       in the parent primary-key domain. Multi-column parent keys and NULL foreign keys are skipped.
+ *       Best effort: on any failure the row order falls back to the conservative existing path.
+ */
+static void
+locator_writeset_collect_fk_ref (THREAD_ENTRY * thread_p, OR_INDEX * index, int btid_index,
+				 HEAP_CACHE_ATTRINFO * attrinfo, RECDES * recdes, OID * inst_oid)
+{
+  LOG_TDES *tdes;
+  TP_DOMAIN *parent_pk_domain;
+  DB_VALUE *fk_key;
+  DB_VALUE dbvalue;
+  BTID fk_btid;
+  char buf[DBVAL_BUFSIZE + MAX_ALIGNMENT];
+  char *aligned_buf;
+
+  if (index == NULL || index->type != BTREE_FOREIGN_KEY || index->fk == NULL)
+    {
+      return;
+    }
+
+  tdes = LOG_FIND_TDES (LOG_FIND_THREAD_TRAN_INDEX (thread_p));
+  if (tdes == NULL || tdes->ws_overflow)
+    {
+      return;
+    }
+
+  parent_pk_domain = btree_read_key_type (thread_p, &index->fk->ref_class_pk_btid);
+  if (parent_pk_domain == NULL)
+    {
+      return;
+    }
+
+  db_make_null (&dbvalue);
+  aligned_buf = PTR_ALIGN (buf, MAX_ALIGNMENT);
+
+  fk_key =
+    heap_attrvalue_get_key (thread_p, btid_index, attrinfo, recdes, &fk_btid, &dbvalue, aligned_buf, NULL, NULL,
+			    inst_oid, true);
+  if (fk_key == NULL)
+    {
+      return;
+    }
+
+  (void) log_writeset_add_ref_dbvalue (thread_p, tdes, &index->fk->ref_class_oid, fk_key, parent_pk_domain);
+
+  if (fk_key == &dbvalue)
+    {
+      pr_clear_value (&dbvalue);
+    }
+}
+
+/*
  * locator_add_or_remove_index_internal () - helper function for
  *                                     locator_add_or_remove_index () and
  *                                     locator_add_or_remove_index_for_moving ()
@@ -7978,6 +8044,15 @@ locator_add_or_remove_index_internal (THREAD_ENTRY * thread_p, RECDES * recdes, 
 	      LOG_TDES *ws_tdes = LOG_FIND_TDES (LOG_FIND_THREAD_TRAN_INDEX (thread_p));
 
 	      (void) log_writeset_add_dbvalue (thread_p, ws_tdes, class_oid, key_dbvalue);
+	    }
+
+	  /* writeset PoC: a foreign-key column value points at a parent row's primary key. Collect a
+	   * reference hash reproducing that parent's write hash so this transaction is ordered behind
+	   * the parent's commit (new FK on insert, old FK on delete; recdes reflects the touched row). */
+	  if (datayn && need_replication && !LOG_CHECK_LOG_APPLIER (thread_p) && log_does_allow_replication () == true
+	      && index->type == BTREE_FOREIGN_KEY)
+	    {
+	      locator_writeset_collect_fk_ref (thread_p, index, i, &index_attrinfo, recdes, inst_oid);
 	    }
 
 	  if (is_insert)
@@ -8658,6 +8733,18 @@ locator_update_index (THREAD_ENTRY * thread_p, RECDES * new_recdes, RECDES * old
 	  if (!same_key)
 	    {
 	      (void) log_writeset_add_dbvalue (thread_p, ws_tdes, class_oid, new_key);
+	    }
+	}
+
+      /* writeset PoC: order this update behind the parent rows its foreign key points at - the old
+       * parent always, and the new parent as well when the foreign-key value changed. */
+      if (repl_info != NULL && repl_info->need_replication && !LOG_CHECK_LOG_APPLIER (thread_p)
+	  && log_does_allow_replication () == true && index->type == BTREE_FOREIGN_KEY)
+	{
+	  locator_writeset_collect_fk_ref (thread_p, index, i, old_attrinfo, old_recdes, oid);
+	  if (!same_key)
+	    {
+	      locator_writeset_collect_fk_ref (thread_p, index, i, new_attrinfo, new_recdes, oid);
 	    }
 	}
 
