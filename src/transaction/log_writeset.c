@@ -106,14 +106,6 @@ log_writeset_history_initialize (void)
    * commit_flush 경로("CLEAR (full)")와 구분되도록 다른 태그로 남긴다. 검증 후 제거. */
   er_log_debug (ARG_FILE_LINE, "writeset history INIT (server boot): cap_limit=%d\n", LOG_WRITESET_HISTORY_CAP);
 
-#if !defined (NDEBUG)
-  /* Foreign-key REF hashes only match the parent's WRITE hash if a child value cast into the
-   * parent primary-key domain packs to the same bytes as the parent's own key. Verify that
-   * invariant once at boot so a packing divergence surfaces immediately rather than as a silent
-   * ordering miss on the slave. Debug builds only. */
-  log_writeset_selfcheck_packing ();
-#endif /* !NDEBUG */
-
   return NO_ERROR;
 }
 
@@ -304,6 +296,19 @@ log_writeset_add_ref_dbvalue (THREAD_ENTRY * thread_p, LOG_TDES * tdes, const OI
   int packed_len = 0;
   int error;
   TP_DOMAIN_STATUS cast_status;
+
+#if !defined (NDEBUG)
+  /* Verify once that a child value cast into the parent primary-key domain packs to the same bytes
+   * as the parent's own key - the invariant the REF hash relies on. It uses parameterized domains
+   * (tp_domain_resolve) and tp_value_cast, so it must run only after the type system is up. The
+   * first foreign-key reference is collected during ordinary DML on a fully booted server, which is
+   * always past tp_init in every mode, whereas the history init runs before tp_init on the recreate
+   * boot path. Debug builds only. */
+  {
+    static pthread_once_t selfcheck_once = PTHREAD_ONCE_INIT;
+    pthread_once (&selfcheck_once, log_writeset_selfcheck_packing);
+  }
+#endif /* !NDEBUG */
 
   if (tdes == NULL || ref_class_oid == NULL || fk_value == NULL || parent_pk_domain == NULL)
     {
