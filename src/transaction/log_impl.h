@@ -560,7 +560,9 @@ struct log_tdes
   /* writeset PoC: per-transaction writeset-key hashes (tdes-lifetime).
    * MySQL Rpl_transaction_write_set_ctx::write_set 와 동형인 벡터(리스트). */
   std::vector < LOG_WRITESET_ENTRY > ws_hashes;	/* collected writeset key hashes (WRITE + FK REF) */
-  bool ws_overflow;		/* set when size exceeds per-tx limit; writeset dropped (= MySQL has_missing_keys) */
+  bool ws_overflow;		/* demote this transaction to commit order: set when the per-tx key limit is
+				 * exceeded (writeset dropped, = MySQL has_missing_keys) or when it carries
+				 * statement replication (DDL etc.) whose effect hashes cannot express */
   LOG_LSA ws_dependency_seq;	/* commit-time dependency label = min (prev commit, writeset parent) */
 
   struct lob_rb_root lob_locator_root;	/* all LOB locators to be created or delete during a transaction */
