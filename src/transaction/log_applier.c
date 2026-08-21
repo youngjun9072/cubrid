@@ -12290,11 +12290,30 @@ la_apply_log_file (const char *database_name, const char *log_path, const int ma
 		  && !LSA_ISNULL (&la_Info.final_lsa)
 		  && la_Info.final_lsa.pageid <= final_log_hdr.append_lsa.pageid)
 		{
-		  /* Catch-up is done and the master is idle, so treating the read
-		   * position as the applied position is normally correct. Copy only
-		   * when final_lsa is in range; a torn/garbage final_lsa must not be
-		   * promoted into committed_lsa (which is persisted right below). */
-		  LSA_COPY (&la_Info.committed_lsa, &la_Info.final_lsa);
+		  LOG_LSA sync_lsa;
+
+		  /* Catch-up is done and the master is idle. Copy only when final_lsa
+		   * is in range; a torn/garbage final_lsa must not be promoted into
+		   * committed_lsa (which is persisted right below). */
+		  LSA_COPY (&sync_lsa, &la_Info.final_lsa);
+
+		  /* The read position alone does not prove the work is applied:
+		   * transactions can still be parked in the dependency gate or running
+		   * on workers. committed_lsa promises "everything at or below is
+		   * applied", so it must never pass la_Gate_frontier, the only
+		   * authority that certifies gap-free completion. Before the frontier
+		   * is seeded nothing has entered the pipeline, so the read position
+		   * is safe to use as-is. */
+		  if (la_Gate_frontier_seeded && !LSA_ISNULL (&la_Gate_frontier) && LSA_GT (&sync_lsa, &la_Gate_frontier))
+		    {
+		      LSA_COPY (&sync_lsa, &la_Gate_frontier);
+		    }
+
+		  /* advance only — a persisted watermark must never retreat */
+		  if (LSA_GT (&sync_lsa, &la_Info.committed_lsa))
+		    {
+		      LSA_COPY (&la_Info.committed_lsa, &sync_lsa);
+		    }
 		}
 	      else if (final_log_hdr.ha_server_state != HA_SERVER_STATE_DEAD)
 		{
