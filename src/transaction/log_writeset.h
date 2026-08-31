@@ -119,5 +119,6 @@ extern int log_writeset_add_ref_dbvalue (THREAD_ENTRY * thread_p, LOG_TDES * tde
 					 DB_VALUE * fk_value, struct tp_domain *parent_pk_domain);
 extern void log_writeset_commit_probe (THREAD_ENTRY * thread_p, LOG_TDES * tdes, LOG_LSA * ws_parent_out);
 extern void log_writeset_commit_flush (THREAD_ENTRY * thread_p, LOG_TDES * tdes, const LOG_LSA * commit_lsa);
+extern UINT64 log_writeset_clock_ns (void);
 
 #endif /* _LOG_WRITESET_H_ */

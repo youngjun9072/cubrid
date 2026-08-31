@@ -26,6 +26,7 @@
 
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <pthread.h>
 
 #include "log_writeset.h"
@@ -41,6 +42,21 @@
 
 #if defined(SERVER_MODE) || defined(SA_MODE)
 
+/*
+ * log_writeset_clock_ns - monotonic wall clock in nanoseconds
+ *
+ * Note: TEST ONLY (writeset perf). Backs the collect/probe/flush/commit timing
+ *       instrumentation; remove together with the perf er_log_debug lines.
+ */
+UINT64
+log_writeset_clock_ns (void)
+{
+  struct timespec ts;
+
+  clock_gettime (CLOCK_MONOTONIC, &ts);
+  return (UINT64) ts.tv_sec * 1000000000ULL + (UINT64) ts.tv_nsec;
+}
+
 /* FNV-1a 64-bit constants */
 #define LOG_WRITESET_FNV_OFFSET_BASIS ((UINT64) 0xcbf29ce484222325ULL)
 #define LOG_WRITESET_FNV_PRIME        ((UINT64) 0x00000100000001b3ULL)
@@ -52,6 +68,10 @@ LOG_WRITESET_HISTORY log_Writeset_history;
 static LOG_LSA log_Writeset_prev_commit_lsa;
 
 static UINT64 log_writeset_fnv1a (const OID * class_oid, const char *packed, int len);
+static int log_writeset_add_dbvalue_internal (THREAD_ENTRY * thread_p, LOG_TDES * tdes, const OID * class_oid,
+					      DB_VALUE * pk);
+static int log_writeset_add_ref_dbvalue_internal (THREAD_ENTRY * thread_p, LOG_TDES * tdes, const OID * ref_class_oid,
+						  DB_VALUE * fk_value, struct tp_domain *parent_pk_domain);
 static int log_writeset_push (THREAD_ENTRY * thread_p, LOG_TDES * tdes, const OID * class_oid, const char *packed,
 			      int len, LOG_WRITESET_KIND kind);
 #if !defined (NDEBUG)
@@ -211,8 +231,8 @@ log_writeset_add_key (THREAD_ENTRY * thread_p, LOG_TDES * tdes, const OID * clas
  *
  * return: NO_ERROR, or an error code on failure
  */
-int
-log_writeset_add_dbvalue (THREAD_ENTRY * thread_p, LOG_TDES * tdes, const OID * class_oid, DB_VALUE * pk)
+static int
+log_writeset_add_dbvalue_internal (THREAD_ENTRY * thread_p, LOG_TDES * tdes, const OID * class_oid, DB_VALUE * pk)
 {
   char *buf = NULL;
   char *ptr;
@@ -263,6 +283,20 @@ log_writeset_add_dbvalue (THREAD_ENTRY * thread_p, LOG_TDES * tdes, const OID * 
   return error;
 }
 
+int
+log_writeset_add_dbvalue (THREAD_ENTRY * thread_p, LOG_TDES * tdes, const OID * class_oid, DB_VALUE * pk)
+{
+  UINT64 perf_t0 = log_writeset_clock_ns ();
+  int error = log_writeset_add_dbvalue_internal (thread_p, tdes, class_oid, pk);
+
+  if (tdes != NULL)
+    {
+      /* TEST ONLY (writeset perf): per-key pack+hash time, reported once per commit at probe */
+      tdes->ws_stat_collect_ns += log_writeset_clock_ns () - perf_t0;
+    }
+  return error;
+}
+
 /*
  * log_writeset_add_ref_dbvalue - add a foreign-key reference hash to the transaction
  *
@@ -285,9 +319,9 @@ log_writeset_add_dbvalue (THREAD_ENTRY * thread_p, LOG_TDES * tdes, const OID * 
  *       falls back to the conservative existing path. NULL foreign keys are skipped, matching
  *       the master's own foreign-key check.
  */
-int
-log_writeset_add_ref_dbvalue (THREAD_ENTRY * thread_p, LOG_TDES * tdes, const OID * ref_class_oid,
-			      DB_VALUE * fk_value, struct tp_domain *parent_pk_domain)
+static int
+log_writeset_add_ref_dbvalue_internal (THREAD_ENTRY * thread_p, LOG_TDES * tdes, const OID * ref_class_oid,
+				       DB_VALUE * fk_value, struct tp_domain *parent_pk_domain)
 {
   DB_VALUE casted;
   char *buf = NULL;
@@ -382,6 +416,21 @@ log_writeset_add_ref_dbvalue (THREAD_ENTRY * thread_p, LOG_TDES * tdes, const OI
   return error;
 }
 
+int
+log_writeset_add_ref_dbvalue (THREAD_ENTRY * thread_p, LOG_TDES * tdes, const OID * ref_class_oid,
+			      DB_VALUE * fk_value, struct tp_domain *parent_pk_domain)
+{
+  UINT64 perf_t0 = log_writeset_clock_ns ();
+  int error = log_writeset_add_ref_dbvalue_internal (thread_p, tdes, ref_class_oid, fk_value, parent_pk_domain);
+
+  if (tdes != NULL)
+    {
+      /* TEST ONLY (writeset perf): per-key cast+pack+hash time, reported once per commit at probe */
+      tdes->ws_stat_collect_ns += log_writeset_clock_ns () - perf_t0;
+    }
+  return error;
+}
+
 /*
  * log_writeset_commit_probe - compute this transaction's dependency label
  *
@@ -399,6 +448,8 @@ void
 log_writeset_commit_probe (THREAD_ENTRY * thread_p, LOG_TDES * tdes, LOG_LSA * ws_parent_out)
 {
   LOG_LSA ws_parent;
+  UINT64 perf_t0 = log_writeset_clock_ns ();	/* TEST ONLY (writeset perf): includes latch wait */
+  size_t perf_wkeys = 0, perf_rkeys = 0, perf_hits = 0;
 
   pthread_mutex_lock (&log_Writeset_history.latch);
 
@@ -426,9 +477,23 @@ log_writeset_commit_probe (THREAD_ENTRY * thread_p, LOG_TDES * tdes, LOG_LSA * w
 	{
 	  auto it = log_Writeset_history.map.find (e.hash);
 
-	  if (it != log_Writeset_history.map.end () && LSA_GT (&it->second, &ws_parent))
+	  /* TEST ONLY (writeset perf): key-kind and map-hit counters */
+	  if (e.kind == LOG_WRITESET_KIND_WRITE)
 	    {
-	      LSA_COPY (&ws_parent, &it->second);
+	      perf_wkeys++;
+	    }
+	  else
+	    {
+	      perf_rkeys++;
+	    }
+
+	  if (it != log_Writeset_history.map.end ())
+	    {
+	      perf_hits++;
+	      if (LSA_GT (&it->second, &ws_parent))
+		{
+		  LSA_COPY (&ws_parent, &it->second);
+		}
 	    }
 	}
     }
@@ -448,11 +513,15 @@ log_writeset_commit_probe (THREAD_ENTRY * thread_p, LOG_TDES * tdes, LOG_LSA * w
    * ws_keys 는 이 트랜잭션이 건드린 행 수(중복 포함), history_start 는 현재 floor. 검증 후 제거. */
   er_log_debug (ARG_FILE_LINE,
 		"writeset probe trid=%d ws_keys=%zu dependency_seq=%lld|%d (ws_parent=%lld|%d prev_commit=%lld|%d "
-		"history_start=%lld|%d)\n", (tdes != NULL ? tdes->trid : -1),
+		"history_start=%lld|%d) wkeys=%zu rkeys=%zu hits=%zu map_size=%zu probe_us=%llu collect_ns=%llu\n",
+		(tdes != NULL ? tdes->trid : -1),
 		(tdes != NULL ? tdes->ws_hashes.size () : (size_t) 0), (long long) ws_parent_out->pageid,
 		(int) ws_parent_out->offset, (long long) ws_parent.pageid, (int) ws_parent.offset,
 		(long long) log_Writeset_prev_commit_lsa.pageid, (int) log_Writeset_prev_commit_lsa.offset,
-		(long long) log_Writeset_history.history_start.pageid, (int) log_Writeset_history.history_start.offset);
+		(long long) log_Writeset_history.history_start.pageid, (int) log_Writeset_history.history_start.offset,
+		perf_wkeys, perf_rkeys, perf_hits, log_Writeset_history.map.size (),
+		(unsigned long long) ((log_writeset_clock_ns () - perf_t0) / 1000),
+		(unsigned long long) (tdes != NULL ? tdes->ws_stat_collect_ns : 0));
 
   pthread_mutex_unlock (&log_Writeset_history.latch);
 }
@@ -474,6 +543,9 @@ log_writeset_commit_flush (THREAD_ENTRY * thread_p, LOG_TDES * tdes, const LOG_L
     {
       return;
     }
+
+  UINT64 perf_t0 = log_writeset_clock_ns ();	/* TEST ONLY (writeset perf): includes latch wait */
+  size_t perf_published = 0;
 
   pthread_mutex_lock (&log_Writeset_history.latch);
 
@@ -499,6 +571,7 @@ log_writeset_commit_flush (THREAD_ENTRY * thread_p, LOG_TDES * tdes, const LOG_L
 	      write_count++;
 	    }
 	}
+      perf_published = write_count;
 
       if (write_count > 0)
 	{
@@ -546,6 +619,11 @@ log_writeset_commit_flush (THREAD_ENTRY * thread_p, LOG_TDES * tdes, const LOG_L
 		    tdes->trid, (long long) log_Writeset_history.history_start.pageid,
 		    (int) log_Writeset_history.history_start.offset);
     }
+
+  /* TEST ONLY (writeset perf): per-commit publish cost and history size */
+  er_log_debug (ARG_FILE_LINE, "writeset flush trid=%d flush_us=%llu published=%zu map_size=%zu\n",
+		tdes->trid, (unsigned long long) ((log_writeset_clock_ns () - perf_t0) / 1000), perf_published,
+		log_Writeset_history.map.size ());
 
   pthread_mutex_unlock (&log_Writeset_history.latch);
 }

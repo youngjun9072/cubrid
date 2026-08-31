@@ -564,6 +564,8 @@ struct log_tdes
 				 * exceeded (writeset dropped, = MySQL has_missing_keys) or when it carries
 				 * statement replication (DDL etc.) whose effect hashes cannot express */
   LOG_LSA ws_dependency_seq;	/* commit-time dependency label = min (prev commit, writeset parent) */
+  UINT64 ws_stat_collect_ns;	/* TEST ONLY (writeset perf): accumulated wall-clock ns spent packing and
+				 * hashing this transaction's writeset keys (WRITE + REF collection) */
 
   struct lob_rb_root lob_locator_root;	/* all LOB locators to be created or delete during a transaction */
 
