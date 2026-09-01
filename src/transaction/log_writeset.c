@@ -454,8 +454,14 @@ void
 log_writeset_commit_probe (THREAD_ENTRY * thread_p, LOG_TDES * tdes, LOG_LSA * ws_parent_out)
 {
   LOG_LSA ws_parent;
+  bool ws_parent_is_read = false;
   UINT64 perf_t0 = log_writeset_clock_ns ();	/* TEST ONLY (writeset perf): includes latch wait */
   size_t perf_wkeys = 0, perf_rkeys = 0, perf_hits = 0;
+
+  if (tdes != NULL)
+    {
+      tdes->ws_dependency_is_read = false;
+    }
 
   pthread_mutex_lock (&log_Writeset_history.latch);
 
@@ -495,17 +501,43 @@ log_writeset_commit_probe (THREAD_ENTRY * thread_p, LOG_TDES * tdes, LOG_LSA * w
 
 	  if (it != log_Writeset_history.map.end ())
 	    {
+	      const LOG_LSA *cand = &it->second.write_seq;
+	      bool cand_is_read = false;
+
 	      perf_hits++;
-	      if (LSA_GT (&it->second, &ws_parent))
+
+	      /* A write must also wait behind the newest reference to its key (the reverse-order
+	       * blind spot: children standing on the row it is about to change). A reference
+	       * consults only the write slot, so siblings referencing the same parent stay
+	       * parallel. On a tie the write slot wins: waiting for that one transaction exactly
+	       * is already sufficient. */
+	      if (e.kind == LOG_WRITESET_KIND_WRITE && LSA_GT (&it->second.read_seq, cand))
 		{
-		  LSA_COPY (&ws_parent, &it->second);
+		  cand = &it->second.read_seq;
+		  cand_is_read = true;
+		}
+
+	      if (!LSA_ISNULL (cand) && LSA_GT (cand, &ws_parent))
+		{
+		  LSA_COPY (&ws_parent, cand);
+		  ws_parent_is_read = cand_is_read;
 		}
 	    }
 	}
     }
 
+  if (ws_parent_is_read)
+    {
+      /* A read-origin dependency names only the NEWEST referencer; earlier referencers may still
+       * be running on the slave, so the label tells the gate to wait for the gap-free frontier
+       * (everything up to it applied) instead of that one transaction's completion. The value is
+       * an upper bound over every referencer of the key, so no clamping against the commit-order
+       * baseline: the frontier wait is already the stronger condition. */
+      LSA_COPY (ws_parent_out, &ws_parent);
+      tdes->ws_dependency_is_read = true;
+    }
   /* dependency_seq = min (prev_commit_lsa, ws_parent); NULL acts as the smallest LSA */
-  if (LSA_ISNULL (&log_Writeset_prev_commit_lsa) || LSA_LT (&ws_parent, &log_Writeset_prev_commit_lsa))
+  else if (LSA_ISNULL (&log_Writeset_prev_commit_lsa) || LSA_LT (&ws_parent, &log_Writeset_prev_commit_lsa))
     {
       LSA_COPY (ws_parent_out, &ws_parent);
     }
@@ -519,13 +551,13 @@ log_writeset_commit_probe (THREAD_ENTRY * thread_p, LOG_TDES * tdes, LOG_LSA * w
    * ws_keys 는 이 트랜잭션이 건드린 행 수(중복 포함), history_start 는 현재 floor. 검증 후 제거. */
   WS_PERF_LOG (ARG_FILE_LINE,
 		"writeset probe trid=%d ws_keys=%zu dependency_seq=%lld|%d (ws_parent=%lld|%d prev_commit=%lld|%d "
-		"history_start=%lld|%d) wkeys=%zu rkeys=%zu hits=%zu map_size=%zu probe_us=%llu collect_ns=%llu\n",
+		"history_start=%lld|%d) wkeys=%zu rkeys=%zu hits=%zu read_dep=%d map_size=%zu probe_us=%llu collect_ns=%llu\n",
 		(tdes != NULL ? tdes->trid : -1),
 		(tdes != NULL ? tdes->ws_hashes.size () : (size_t) 0), (long long) ws_parent_out->pageid,
 		(int) ws_parent_out->offset, (long long) ws_parent.pageid, (int) ws_parent.offset,
 		(long long) log_Writeset_prev_commit_lsa.pageid, (int) log_Writeset_prev_commit_lsa.offset,
 		(long long) log_Writeset_history.history_start.pageid, (int) log_Writeset_history.history_start.offset,
-		perf_wkeys, perf_rkeys, perf_hits, log_Writeset_history.map.size (),
+		perf_wkeys, perf_rkeys, perf_hits, (int) ws_parent_is_read, log_Writeset_history.map.size (),
 		(unsigned long long) ((log_writeset_clock_ns () - perf_t0) / 1000),
 		(unsigned long long) (tdes != NULL ? tdes->ws_stat_collect_ns : 0));
 
@@ -551,7 +583,7 @@ log_writeset_commit_flush (THREAD_ENTRY * thread_p, LOG_TDES * tdes, const LOG_L
     }
 
   UINT64 perf_t0 = log_writeset_clock_ns ();	/* TEST ONLY (writeset perf): includes latch wait */
-  size_t perf_published = 0;
+  size_t perf_published_w = 0, perf_published_r = 0;
 
   pthread_mutex_lock (&log_Writeset_history.latch);
 
@@ -564,44 +596,54 @@ log_writeset_commit_flush (THREAD_ENTRY * thread_p, LOG_TDES * tdes, const LOG_L
 
   if (!tdes->ws_overflow && !tdes->ws_hashes.empty ())
     {
-      /* Only WRITE keys are published into the history. REF keys probed the history above (so the
-       * transaction waits behind the parent's commit) but must not be published: publishing a
-       * reference would make a later sibling that points at the same parent match this sibling and
-       * serialize behind it for no reason. Count WRITE keys so both the capacity test and the
-       * inserts see the real published amount. */
-      size_t write_count = 0;
+      /* WRITE keys own the write slot of their entry. REF keys stamp the read slot, so a later
+       * writer of the key (the parent row a child stood on) sees and waits behind its newest
+       * referencer. The slot split is what keeps siblings parallel: references consult only the
+       * write slot at probe, so a reference stamp never chains one sibling behind another. The
+       * capacity test counts every key about to be published (a referenced-only parent key also
+       * creates an entry). */
+      size_t publish_count = tdes->ws_hashes.size ();
+
+      /* CAP 초과하면 히스토리를 통째로 비우고 보수적 floor 를 이 commit LSA 로 올린다
+       * (= MySQL m_writeset_history.clear() + m_writeset_history_start = seq). */
+      if (log_Writeset_history.map.size () + publish_count > (size_t) LOG_WRITESET_HISTORY_CAP)
+	{
+	  /* TEST ONLY (writeset PoC 검증): 히스토리가 가득 차서 통째로 비우는 경로. 부팅 초기화
+	   * ("INIT (server boot)")와 구분되는 태그. 검증 후 제거. */
+	  er_log_debug (ARG_FILE_LINE,
+			"writeset history CLEAR (full): prev_count=%zu + tx=%zu > cap=%d, new history_start=%lld|%d\n",
+			log_Writeset_history.map.size (), publish_count, LOG_WRITESET_HISTORY_CAP,
+			(long long) commit_lsa->pageid, (int) commit_lsa->offset);
+	  log_Writeset_history.map.clear ();
+	  LSA_COPY (&log_Writeset_history.history_start, commit_lsa);
+	}
+
       for (const LOG_WRITESET_ENTRY & e : tdes->ws_hashes)
 	{
+	  auto it = log_Writeset_history.map.find (e.hash);
+
+	  if (it == log_Writeset_history.map.end ())
+	    {
+	      LOG_WRITESET_SLOTS slots;
+
+	      LSA_SET_NULL (&slots.write_seq);
+	      LSA_SET_NULL (&slots.read_seq);
+	      it = log_Writeset_history.map.emplace (e.hash, slots).first;
+	    }
+
 	  if (e.kind == LOG_WRITESET_KIND_WRITE)
 	    {
-	      write_count++;
+	      LSA_COPY (&it->second.write_seq, commit_lsa);
+	      perf_published_w++;
 	    }
-	}
-      perf_published = write_count;
-
-      if (write_count > 0)
-	{
-	  /* CAP 초과하면 히스토리를 통째로 비우고 보수적 floor 를 이 commit LSA 로 올린다
-	   * (= MySQL m_writeset_history.clear() + m_writeset_history_start = seq). */
-	  if (log_Writeset_history.map.size () + write_count > (size_t) LOG_WRITESET_HISTORY_CAP)
+	  else
 	    {
-	      /* TEST ONLY (writeset PoC 검증): 히스토리가 가득 차서 통째로 비우는 경로. 부팅 초기화
-	       * ("INIT (server boot)")와 구분되는 태그. 검증 후 제거. */
-	      er_log_debug (ARG_FILE_LINE,
-			    "writeset history CLEAR (full): prev_count=%zu + tx=%zu > cap=%d, new history_start=%lld|%d\n",
-			    log_Writeset_history.map.size (), write_count, LOG_WRITESET_HISTORY_CAP,
-			    (long long) commit_lsa->pageid, (int) commit_lsa->offset);
-	      log_Writeset_history.map.clear ();
-	      LSA_COPY (&log_Writeset_history.history_start, commit_lsa);
-	    }
-
-	  /* 이 트랜잭션의 WRITE 키들에 현재 commit LSA 를 기록(신규 삽입 또는 갱신). */
-	  for (const LOG_WRITESET_ENTRY & e : tdes->ws_hashes)
-	    {
-	      if (e.kind == LOG_WRITESET_KIND_WRITE)
+	      /* the read slot keeps the newest referencer only and moves forward monotonically */
+	      if (LSA_GT (commit_lsa, &it->second.read_seq))
 		{
-		  log_Writeset_history.map[e.hash] = *commit_lsa;
+		  LSA_COPY (&it->second.read_seq, commit_lsa);
 		}
+	      perf_published_r++;
 	    }
 	}
     }
@@ -627,9 +669,9 @@ log_writeset_commit_flush (THREAD_ENTRY * thread_p, LOG_TDES * tdes, const LOG_L
     }
 
   /* TEST ONLY (writeset perf): per-commit publish cost and history size */
-  WS_PERF_LOG (ARG_FILE_LINE, "writeset flush trid=%d flush_us=%llu published=%zu map_size=%zu\n",
-		tdes->trid, (unsigned long long) ((log_writeset_clock_ns () - perf_t0) / 1000), perf_published,
-		log_Writeset_history.map.size ());
+  WS_PERF_LOG (ARG_FILE_LINE, "writeset flush trid=%d flush_us=%llu published_w=%zu published_r=%zu map_size=%zu\n",
+		tdes->trid, (unsigned long long) ((log_writeset_clock_ns () - perf_t0) / 1000), perf_published_w,
+		perf_published_r, log_Writeset_history.map.size ());
 
   pthread_mutex_unlock (&log_Writeset_history.latch);
 }

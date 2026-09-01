@@ -145,6 +145,7 @@ TEST_CASE ("same key waits behind its previous writer", "[writeset]")
 
   LOG_LSA dep = probe (t2);
   REQUIRE (LSA_EQ (&dep, &l1));
+  REQUIRE (!t2->ws_dependency_is_read);	/* write-origin: exact completion of l1 is sufficient */
 
   delete t1;
   delete t2;
@@ -220,7 +221,7 @@ TEST_CASE ("foreign-key reference waits behind the parent's writer", "[writeset]
   delete child;
 }
 
-TEST_CASE ("references are not published: siblings stay parallel, reverse order is invisible", "[writeset]")
+TEST_CASE ("references stamp the read slot: siblings stay parallel, a later parent write waits", "[writeset]")
 {
   ws_history_guard history;
   OID parent_cls = oid_of (1, 200, 1);
@@ -231,32 +232,78 @@ TEST_CASE ("references are not published: siblings stay parallel, reverse order 
   add_write_int (parent, &parent_cls, 7);
   log_writeset_commit_flush (NULL, parent, &l1);
 
-  /* first child references the parent and commits */
+  /* first child references the parent and commits: its own dependency is the
+   * parent's writer (write slot), and it stamps the read slot at flush */
   log_tdes *child1 = make_tdes (2);
   add_ref_int (child1, &parent_cls, 7);
   LOG_LSA dep1 = probe (child1);
   REQUIRE (LSA_EQ (&dep1, &l1));
+  REQUIRE (!child1->ws_dependency_is_read);
   log_writeset_commit_flush (NULL, child1, &l2);
 
-  /* a sibling referencing the same parent still depends on the parent only,
-   * not on child1: references leave no trace, so siblings stay parallel */
+  /* a sibling referencing the same parent still depends on the parent only:
+   * references consult the write slot, never the read slot, so child1's stamp
+   * does not chain the siblings */
   log_tdes *child2 = make_tdes (3);
   add_ref_int (child2, &parent_cls, 7);
   LOG_LSA dep2 = probe (child2);
   REQUIRE (LSA_EQ (&dep2, &l1));
+  REQUIRE (!child2->ws_dependency_is_read);
 
-  /* a later write to the parent row also sees only the previous writer (l1),
-   * not the child that referenced it (l2). This is the reverse-order blind
-   * spot documented in doc 5; once the read/write slot split lands, this
-   * expectation must change to l2 and carry the read-origin flag. */
+  /* a later write to the parent row now sees the newest referencer (l2), not
+   * just the previous writer (l1): the reverse-order blind spot of doc 5 is
+   * closed. The label carries the read-origin flag so the slave gate waits for
+   * the gap-free frontier instead of that one transaction's completion. */
   log_tdes *parent_delete = make_tdes (4);
   add_write_int (parent_delete, &parent_cls, 7);
   LOG_LSA dep3 = probe (parent_delete);
-  REQUIRE (LSA_EQ (&dep3, &l1));
+  REQUIRE (LSA_EQ (&dep3, &l2));
+  REQUIRE (parent_delete->ws_dependency_is_read);
 
   delete parent;
   delete child1;
   delete child2;
+  delete parent_delete;
+}
+
+TEST_CASE ("read slot on a never-written key: parallel siblings, monotonic stamp, flagged writer", "[writeset]")
+{
+  ws_history_guard history;
+  OID parent_cls = oid_of (1, 200, 1);
+  LOG_LSA l5 = lsa_of (50, 0);
+  LOG_LSA l3 = lsa_of (30, 0);
+
+  /* the referenced key has no write history (e.g. the parent row predates the
+   * current history window): the reference creates the entry with only the
+   * read slot filled */
+  log_tdes *child1 = make_tdes (1);
+  add_ref_int (child1, &parent_cls, 9);
+  LOG_LSA dep1 = probe (child1);
+  REQUIRE (LSA_ISNULL (&dep1));
+  log_writeset_commit_flush (NULL, child1, &l5);
+
+  /* a sibling still sees an empty write slot: independent */
+  log_tdes *child2 = make_tdes (2);
+  add_ref_int (child2, &parent_cls, 9);
+  LOG_LSA dep2 = probe (child2);
+  REQUIRE (LSA_ISNULL (&dep2));
+
+  /* an out-of-order (older) reference flush must not move the read slot backwards */
+  log_tdes *child3 = make_tdes (3);
+  add_ref_int (child3, &parent_cls, 9);
+  log_writeset_commit_flush (NULL, child3, &l3);
+
+  /* the parent's writer waits for the newest referencer (l5, not l3) with the
+   * read-origin flag set */
+  log_tdes *parent_delete = make_tdes (4);
+  add_write_int (parent_delete, &parent_cls, 9);
+  LOG_LSA dep3 = probe (parent_delete);
+  REQUIRE (LSA_EQ (&dep3, &l5));
+  REQUIRE (parent_delete->ws_dependency_is_read);
+
+  delete child1;
+  delete child2;
+  delete child3;
   delete parent_delete;
 }
 
@@ -276,6 +323,7 @@ TEST_CASE ("overflow demotes to commit order and raises the history floor", "[wr
   ovf->ws_overflow = true;
   LOG_LSA dep = probe (ovf);
   REQUIRE (LSA_EQ (&dep, &l1));
+  REQUIRE (!ovf->ws_dependency_is_read);
 
   /* and its flush clears the history and raises the floor, so everything
    * after waits for the overflow commit */

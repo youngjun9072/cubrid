@@ -114,6 +114,10 @@
 #define LA_DEBUG_LOG(...) ((void) 0)
 #endif /* !NDEBUG */
 
+/* TEST ONLY (writeset PoC benchmark): keep transaction boundary timing in release builds too.
+ * _er_log_debug bypasses PRM_ID_ER_LOG_DEBUG so the existing verbose debug logs can remain disabled. */
+#define LA_BENCH_TIMING_LOG(...) _er_log_debug (__VA_ARGS__)
+
 /* for adaptive commit interval */
 #define LA_NUM_DELAY_HISTORY                    10
 #define LA_MAX_TOLERABLE_DELAY                  2
@@ -322,6 +326,10 @@ struct la_apply_task
   /* writeset PoC: 마스터 commit_seq 기준 dependency_seq. 커밋 직전 LOG_DUMMY_WS_LABEL 에서
    * 디코드한다. 게이트가 이 값의 선행 트랜잭션 완료를 기다린다. NULL=의존 없음. */
   LOG_LSA dependency_seq;
+  /* dependency_seq 가 키의 read 슬롯(마지막 참조자)에서 나온 라벨. 참조자들은 병렬이라 그
+   * 하나의 완료가 앞선 참조자들의 완료를 보장하지 않으므로, 게이트는 완료집합 멤버십 대신
+   * 프론티어(그 LSA 이하 전부 적용 완료)로만 통과시킨다. */
+  bool dependency_is_read;
 };
 
 typedef struct la_apply_stats LA_APPLY_STATS;
@@ -615,6 +623,16 @@ static LA_DISPATCH_ORDER la_Dispatch_order;
 /* 리더가 부여하는 단조 증가 시퀀스.
  * 워커 결과를 out-of-order 로 회수하더라도 retire 는 이 순서대로만 수행한다. */
 static UINT64 la_dispatch_sequence = 0;
+
+#define LA_TIME_BEGIN(tv) gettimeofday (&(tv), NULL)
+#define LA_TIME_ACCUM_USEC(tv_begin, total_var) \
+  do { \
+    struct timeval _tv_end; \
+    gettimeofday (&_tv_end, NULL); \
+    (total_var) += (UINT64) (((INT64) _tv_end.tv_sec - (INT64) (tv_begin).tv_sec) * 1000000LL \
+                             + ((INT64) _tv_end.tv_usec - (INT64) (tv_begin).tv_usec)); \
+  } while (0)
+
 #if !defined (NDEBUG)
 typedef struct la_parallel_apply_window_stats LA_PARALLEL_APPLY_WINDOW_STATS;
 struct la_parallel_apply_window_stats
@@ -628,15 +646,6 @@ struct la_parallel_apply_window_stats
 };
 
 static LA_PARALLEL_APPLY_WINDOW_STATS la_Parallel_apply_window;
-
-#define LA_TIME_BEGIN(tv) gettimeofday (&(tv), NULL)
-#define LA_TIME_ACCUM_USEC(tv_begin, total_var) \
-  do { \
-    struct timeval _tv_end; \
-    gettimeofday (&_tv_end, NULL); \
-    (total_var) += (UINT64) (((INT64) _tv_end.tv_sec - (INT64) (tv_begin).tv_sec) * 1000000LL \
-                             + ((INT64) _tv_end.tv_usec - (INT64) (tv_begin).tv_usec)); \
-  } while (0)
 
 typedef struct la_debug_progress_stats LA_DEBUG_PROGRESS_STATS;
 struct la_debug_progress_stats
@@ -872,7 +881,8 @@ static void la_clear_all_repl_and_commit_list (void);
 static int la_set_repl_log (LOG_PAGE * log_pgptr, int log_type, int tranid, LOG_LSA * lsa);
 static int la_add_node_into_la_commit_list (int tranid, LOG_LSA * lsa, int type, time_t eot_time);
 static time_t la_retrieve_eot_time (LOG_PAGE * pgptr, LOG_LSA * lsa);
-static void la_retrieve_ws_label (LOG_PAGE * pgptr, LOG_LSA * lsa, LOG_LSA * dependency_seq);
+static void la_retrieve_ws_label (LOG_PAGE * pgptr, LOG_LSA * lsa, LOG_LSA * dependency_seq,
+				  bool * dependency_is_read);
 static int la_get_current (OR_BUF * buf, SM_CLASS * sm_class, int bound_bit_flag, DB_OTMPL * def, DB_VALUE * key,
 			   int offset_size);
 static void la_make_room_for_mvcc_insid (RECDES * recdes);
@@ -1674,7 +1684,7 @@ la_gate_mark_completed (const LOG_LSA * commit_seq)
  * ②는 최적화(빠른 경로 + prune 으로 메모리 상한), ③이 근본(홀 커버). 근거는 게이트 헤더 주석 참조.
  */
 static bool
-la_gate_is_satisfied (const LOG_LSA * dep)
+la_gate_is_satisfied (const LOG_LSA * dep, bool dep_is_read)
 {
   if (LSA_ISNULL (dep))
     {
@@ -1683,6 +1693,13 @@ la_gate_is_satisfied (const LOG_LSA * dep)
   if (la_Gate_frontier_seeded && LSA_LE (dep, &la_Gate_frontier))
     {
       return true;		/* ② LWM 이하 = 그 이하 커밋 전부 적용 완료 */
+    }
+  if (dep_is_read)
+    {
+      /* read 슬롯 유래 라벨은 "마지막 참조자"만 가리킨다. 참조자들은 병렬이라 그 하나가
+       * 완료집합에 먼저 들어와도(홀) 앞선 참조자가 실행 중일 수 있으므로, 완료집합 멤버십
+       * 으로는 통과시키지 않고 프론티어가 라벨까지 올라올 때만(②) 내보낸다. */
+      return false;
     }
   return la_gate_set_contains (dep);	/* ③ 프론티어 위 홀: 완료집합에서 직접 확인 */
 }
@@ -1729,7 +1746,7 @@ la_gate_drain_ready (void)
       progressed = false;
       while (cur != NULL)
 	{
-	  if (la_gate_is_satisfied (&cur->task.dependency_seq))
+	  if (la_gate_is_satisfied (&cur->task.dependency_seq, cur->task.dependency_is_read))
 	    {
 	      LA_GATE_PENDING *ready = cur;
 
@@ -3378,7 +3395,8 @@ la_apply_worker_main (void *arg)
       LA_APPLY_TASK task;
       LA_APPLY_RESULT result;
       int total_rows = 0;
-      unsigned long long applied_item_count;
+      unsigned long long applied_item_count = 0;
+      struct timeval bench_begin;
 
       if (la_dequeue_apply_task (worker, &task) != NO_ERROR)
 	{
@@ -3393,6 +3411,8 @@ la_apply_worker_main (void *arg)
       la_Debug_worker_current_stage[worker_context.worker_idx] = LA_WORKER_STAGE_APPLY;
 #endif /* !NDEBUG */
 
+      LA_TIME_BEGIN (bench_begin);
+
       memset (&result, 0, sizeof (result));
       result.seq = task.seq;
       result.tranid = task.tranid;
@@ -3400,13 +3420,14 @@ la_apply_worker_main (void *arg)
       result.commit_lsa = task.commit_lsa;
       LSA_SET_NULL (&result.committed_rep_lsa);
       result.log_record_time = task.log_record_time;
-      /* TEST ONLY (writeset PoC 검증): 워커가 이 트랜잭션 적용을 "시작"하는 시점. release 에서도
-       * er_log_debug=yes 면 남는다. 에러로그의 타임스탬프로 워커간 START/END 구간이 겹치면 병렬,
-       * 겹치지 않고 한 워커의 END 뒤에 다음 START 가 오면 직렬이다. 검증 후 제거. */
-      er_log_debug (ARG_FILE_LINE, "ws_apply START worker=%d trid=%d rectype=%d commit_lsa=%lld|%d dep=%lld|%d\n",
-		    (int) (worker - la_apply_Workers), task.tranid, task.rectype, (long long) task.commit_lsa.pageid,
-		    (int) task.commit_lsa.offset, (long long) task.dependency_seq.pageid,
-		    (int) task.dependency_seq.offset);
+      /* TEST ONLY (writeset PoC 검증): 워커가 이 트랜잭션 적용을 "시작"하는 시점.
+       * 전역 er_log_debug 설정을 우회하므로 기존 대량 debug 로그를 끈 채 START/END만 남길 수 있다.
+       * 워커간 START/END 구간이 겹치면 병렬, 한 워커의 END 뒤에 다음 START가 오면 직렬이다. */
+      LA_BENCH_TIMING_LOG (ARG_FILE_LINE,
+			   "ws_apply START worker=%d trid=%d rectype=%d commit_lsa=%lld|%d dep=%lld|%d\n",
+			   (int) (worker - la_apply_Workers), task.tranid, task.rectype,
+			   (long long) task.commit_lsa.pageid, (int) task.commit_lsa.offset,
+			   (long long) task.dependency_seq.pageid, (int) task.dependency_seq.offset);
       LA_DEBUG_LOG (ARG_FILE_LINE,
 		    "worker[tid=%lu idx=%d tran=%d] dequeued trid=%d rectype=%d apply=%p commit_lsa=%lld|%d dep=%lld|%d head=%p\n",
 		    (unsigned long) pthread_self (), (int) (worker - la_apply_Workers), tm_Tran_index, task.tranid,
@@ -3500,12 +3521,24 @@ la_apply_worker_main (void *arg)
 			(unsigned long) pthread_self (), (int) (worker - la_apply_Workers), tm_Tran_index, task.tranid,
 			result.stats.last_class_name[0] != '\0' ? result.stats.last_class_name : "<none>",
 			result.error, worker_applied_item_count);
-	  /* TEST ONLY (writeset PoC 검증): 워커가 이 트랜잭션 적용을 "종료(커밋 완료)"한 시점.
-	   * START 와 짝지어 워커별 구간 겹침으로 직렬/병렬을 판정한다. 검증 후 제거. */
-	  er_log_debug (ARG_FILE_LINE, "ws_apply END   worker=%d trid=%d commit_lsa=%lld|%d applied=%llu err=%d\n",
-			(int) (worker - la_apply_Workers), task.tranid, (long long) task.commit_lsa.pageid,
-			(int) task.commit_lsa.offset, applied_item_count, result.error);
 	}
+
+      {
+	UINT64 bench_elapsed_usec = 0;
+
+	LA_TIME_ACCUM_USEC (bench_begin, bench_elapsed_usec);
+	/* TEST ONLY (writeset PoC 검증): 전역 er_log_debug=no 상태에서도 transaction당 START/END 두 줄만
+	 * release/debug 빌드 모두 남긴다. START는 worker dequeue 직후, END는 apply/commit 처리 종료 시점이다. */
+	LA_BENCH_TIMING_LOG (ARG_FILE_LINE,
+			     "ws_apply END   worker=%d trid=%d rectype=%d commit_lsa=%lld|%d "
+			     "class=%s elapsed_usec=%llu applied=%llu ins=%d upd=%d del=%d schema=%d fail=%d err=%d\n",
+			     (int) (worker - la_apply_Workers), task.tranid, task.rectype,
+			     (long long) task.commit_lsa.pageid, (int) task.commit_lsa.offset,
+			     result.stats.last_class_name[0] != '\0' ? result.stats.last_class_name : "<none>",
+			     (unsigned long long) bench_elapsed_usec, applied_item_count, result.stats.insert_counter,
+			     result.stats.update_counter, result.stats.delete_counter, result.stats.schema_counter,
+			     result.stats.fail_counter, result.error);
+      }
 
 #if !defined (NDEBUG)
       LA_TIME_ACCUM_USEC (_busy_begin, la_Debug_progress.worker_busy_usec_total[worker_context.worker_idx]);
@@ -3736,18 +3769,30 @@ la_log_io_read_with_max_retries (char *vname, int vdes, void *io_pgptr, LOG_PHY_
   off64_t offset = ((off64_t) pagesize) * ((off64_t) pageid);
   char *current_ptr = (char *) io_pgptr;
 
+#if defined (WINDOWS)
   if (lseek64 (vdes, offset, SEEK_SET) == -1)
     {
       er_set_with_oserror (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_IO_READ, 2, pageid, vname);
       return ER_FAILED;
     }
+#endif /* WINDOWS */
 
   while (remain_bytes > 0 && retries != 0)
     {
       retries = (retries > 0) ? retries - 1 : retries;
 
-      /* Read the desired page */
+      /* Read the desired page.
+       * The reader and the apply workers share this descriptor (act/arv log),
+       * and the file offset lives on the descriptor: the historical
+       * lseek64+read pair let one thread's seek redirect another thread's
+       * read, so the header fetch could return an arbitrary data page
+       * (spurious mark_will_del reinit, emptied prefix_name -> "_lgar000"
+       * mount livelock). pread keeps the offset local to each call. */
+#if defined (WINDOWS)
       nbytes = read (vdes, current_ptr, remain_bytes);
+#else
+      nbytes = (int) pread64 (vdes, current_ptr, remain_bytes, offset);
+#endif
 
       if (nbytes == 0)
 	{
@@ -3775,6 +3820,7 @@ la_log_io_read_with_max_retries (char *vname, int vdes, void *io_pgptr, LOG_PHY_
 
       remain_bytes -= nbytes;
       current_ptr += nbytes;
+      offset += nbytes;
     }
 
   if (remain_bytes > 0)
@@ -5808,6 +5854,13 @@ la_find_log_pagesize (LA_ACT_LOG * act_log, const char *logpath, const char *dbn
       /* check mark will deleted */
       if (act_log->log_hdr->mark_will_del == true)
 	{
+	  /* TEST ONLY (mark_will_del 진단): 헤더를 읽자마자 mark_will_del 이 켜져 있으면 여기서 3초 쉬고
+	   * mount 실패로 되돌린다. copylogdb 가 언제 이 플래그를 남겼는지 대조할 수 있게 헤더값을 남긴다. */
+	  er_log_debug (ARG_FILE_LINE,
+			"la_fetch_log_hdr saw mark_will_del=true (db_creation=%lld db_restore_time=%lld) path=%s\n",
+			(long long) act_log->log_hdr->db_creation, (long long) act_log->log_hdr->db_restore_time,
+			act_log->path);
+
 	  LA_SLEEP (3, 0);
 
 	  er_set_with_oserror (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_LOG_MOUNT_FAIL, 1, act_log->path);
@@ -6770,7 +6823,7 @@ la_retrieve_eot_time (LOG_PAGE * pgptr, LOG_LSA * lsa)
  * Note: la_retrieve_eot_time() 과 동일한 패턴. 레코드 헤더 뒤 data_header 를 읽는다.
  */
 static void
-la_retrieve_ws_label (LOG_PAGE * pgptr, LOG_LSA * lsa, LOG_LSA * dependency_seq)
+la_retrieve_ws_label (LOG_PAGE * pgptr, LOG_LSA * lsa, LOG_LSA * dependency_seq, bool * dependency_is_read)
 {
   int error = NO_ERROR;
   LOG_REC_WS_LABEL *ws_label;
@@ -6779,6 +6832,7 @@ la_retrieve_ws_label (LOG_PAGE * pgptr, LOG_LSA * lsa, LOG_LSA * dependency_seq)
   LOG_PAGE *pg;
 
   LSA_SET_NULL (dependency_seq);
+  *dependency_is_read = false;
 
   pageid = lsa->pageid;
   offset = DB_SIZEOF (LOG_RECORD_HEADER) + lsa->offset;
@@ -6798,6 +6852,7 @@ la_retrieve_ws_label (LOG_PAGE * pgptr, LOG_LSA * lsa, LOG_LSA * dependency_seq)
 
   ws_label = (LOG_REC_WS_LABEL *) ((char *) pg->area + offset);
   LSA_COPY (dependency_seq, &ws_label->dependency_seq);
+  *dependency_is_read = ws_label->dependency_is_read;
 }
 
 /*
@@ -9795,6 +9850,7 @@ la_log_record_process (LOG_RECORD_HEADER * lrec, LOG_LSA * final, LOG_PAGE * pg_
    * 리더(로그를 읽는 단일 스레드)만 접근하므로 락이 필요 없다. */
   static int la_ws_label_trid = NULL_TRANID;
   static LOG_LSA la_ws_label_dependency_seq = { NULL_PAGEID, NULL_OFFSET };
+  static bool la_ws_label_dependency_is_read = false;
 
 #if !defined (NDEBUG)
   /* Per-trid run length trace. Emits one line whenever the trid the reader is currently
@@ -10058,11 +10114,13 @@ la_log_record_process (LOG_RECORD_HEADER * lrec, LOG_LSA * final, LOG_PAGE * pg_
 	  if (la_ws_label_trid == lrec->trid)
 	    {
 	      LSA_COPY (&task.dependency_seq, &la_ws_label_dependency_seq);
+	      task.dependency_is_read = la_ws_label_dependency_is_read;
 	      la_ws_label_trid = NULL_TRANID;
 	    }
 	  else
 	    {
 	      LSA_SET_NULL (&task.dependency_seq);
+	      task.dependency_is_read = false;
 	    }
 
 	  /*프론티어는 첫 커밋 처리 직전 재시작 지점(la_Info.committed_lsa, 하위 전부 적용됨)으로
@@ -10081,7 +10139,7 @@ la_log_record_process (LOG_RECORD_HEADER * lrec, LOG_LSA * final, LOG_PAGE * pg_
 
 	  /* writeset PoC: 의존 미충족이면 워커로 안 보내고 리더 pending 큐에 park.
 	   * reader 는 막히지 않고 다음 레코드를 계속 읽는다. 선행 완료 시 collect 후 drain 에서 디스패치. */
-	  if (la_gate_is_satisfied (&task.dependency_seq))
+	  if (la_gate_is_satisfied (&task.dependency_seq, task.dependency_is_read))
 	    {
 	      /* TEST ONLY (writeset PoC 검증): 리더가 즉시 디스패치(의존 충족). park 대비 비율로
 	       * 게이트가 병렬을 흘려보내는지 직렬로 막는지 본다. 검증 후 제거. */
@@ -10165,7 +10223,7 @@ la_log_record_process (LOG_RECORD_HEADER * lrec, LOG_LSA * final, LOG_PAGE * pg_
     case LOG_DUMMY_WS_LABEL:
       /* writeset PoC: 커밋 직전 라벨 레코드. dependency_seq 를 디코드해 홀더에 저장해 두면,
        * 바로 뒤따르는 LOG_COMMIT(같은 trid)이 task.dependency_seq 로 꺼내 쓴다. */
-      la_retrieve_ws_label (pg_ptr, final, &la_ws_label_dependency_seq);
+      la_retrieve_ws_label (pg_ptr, final, &la_ws_label_dependency_seq, &la_ws_label_dependency_is_read);
       la_ws_label_trid = lrec->trid;
       LA_DEBUG_LOG (ARG_FILE_LINE, "reader ws_label trid=%d dependency_seq=%lld|%d at=%lld|%d\n", lrec->trid,
 		    (long long) la_ws_label_dependency_seq.pageid, (int) la_ws_label_dependency_seq.offset,
@@ -11891,6 +11949,18 @@ check_reinit_copylog (void)
 
   if (la_Info.act_log.log_hdr->mark_will_del)
     {
+      /* TEST ONLY (mark_will_del 진단): copylogdb 가 켜 둔 mark_will_del 을 applier 가 읽은 순간이다.
+       * 이 뒤로 복제 로그/카탈로그를 재초기화(-1040)하고 프로세스를 재시작한다. 헤더의 생성/복원
+       * 시각과 진행 좌표를 함께 남겨, 실제 peer 재생성인지 오판인지 대조할 수 있게 한다. */
+      er_log_debug (ARG_FILE_LINE,
+		    "applier detected mark_will_del=true -> reinit copylog (db_creation=%lld db_restore_time=%lld "
+		    "append_lsa=%lld|%d eof_lsa=%lld|%d)\n",
+		    (long long) la_Info.act_log.log_hdr->db_creation,
+		    (long long) la_Info.act_log.log_hdr->db_restore_time,
+		    (long long) la_Info.act_log.log_hdr->append_lsa.pageid,
+		    (int) la_Info.act_log.log_hdr->append_lsa.offset,
+		    (long long) la_Info.act_log.log_hdr->eof_lsa.pageid, (int) la_Info.act_log.log_hdr->eof_lsa.offset);
+
       la_Info.reinit_copylog = true;
       return ER_FAILED;
     }

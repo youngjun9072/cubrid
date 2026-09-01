@@ -4692,6 +4692,7 @@ log_append_ws_label_with_lock (THREAD_ENTRY * thread_p, LOG_TDES * tdes)
 
   ws_label = (LOG_REC_WS_LABEL *) node->data_header;
   LSA_COPY (&ws_label->dependency_seq, &tdes->ws_dependency_seq);
+  ws_label->dependency_is_read = tdes->ws_dependency_is_read;
 
   (void) prior_lsa_next_record_with_lock (thread_p, node, tdes);
 }

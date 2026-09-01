@@ -97,13 +97,29 @@ struct tp_domain;
 #define LOG_WRITESET_TX_LIMIT     250000
 #define LOG_WRITESET_HISTORY_CAP  2000000
 
-/* global commit history (MySQL rpl_trx_tracking 방식): writeset 키 해시 -> 최신 커밋 LSA 표준
+/* per-key history entry, split into two slots.
+ * write_seq: the last commit that wrote the row owning this key (INSERT/DELETE/UPDATE).
+ * read_seq: the last commit that pointed at this key through a foreign-key value.
+ * A writer must wait behind both slots (the previous writer, and every child still standing on
+ * the row - the reverse-order blind spot of the single-slot design). A reference consults only
+ * write_seq, so siblings referencing the same parent never wait behind one another. read_seq
+ * keeps the newest referencer only; it is a monotonic upper bound over every referencer, which
+ * is sufficient because a read-origin dependency is gated on the gap-free frontier (all commits
+ * up to it applied), not on that single transaction. */
+typedef struct log_writeset_slots LOG_WRITESET_SLOTS;
+struct log_writeset_slots
+{
+  LOG_LSA write_seq;
+  LOG_LSA read_seq;
+};
+
+/* global commit history (MySQL rpl_trx_tracking 방식): writeset 키 해시 -> 슬롯(쓰기/참조) 표준
  * 해시맵. 손수 만든 오픈 어드레싱 대신 std::unordered_map 이 성장/적재율을 알아서 관리하고,
  * CAP 초과 시 통째로 clear + history_start 상향(= MySQL m_writeset_history.clear()). */
 typedef struct log_writeset_history LOG_WRITESET_HISTORY;
 struct log_writeset_history
 {
-  std::unordered_map < LOG_WRITESET_HASH, LOG_LSA > map;	/* 키 해시 -> 최신 커밋 LSA */
+  std::unordered_map < LOG_WRITESET_HASH, LOG_WRITESET_SLOTS > map;	/* 키 해시 -> 쓰기/참조 슬롯 */
   LOG_LSA history_start;	/* clear 로 evict 된 키의 보수적 부모 LSA */
   pthread_mutex_t latch;	/* 전체 보호 */
 };
