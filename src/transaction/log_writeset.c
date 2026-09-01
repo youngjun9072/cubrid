@@ -42,11 +42,17 @@
 
 #if defined(SERVER_MODE) || defined(SA_MODE)
 
+/* Perf measurement logs must reach the error log in release builds without turning on the global
+ * er_log_debug parameter (which would enable every verbose debug log and disturb the measurement):
+ * _er_log_debug bypasses PRM_ID_ER_LOG_DEBUG. Same convention as LA_BENCH_TIMING_LOG in
+ * log_applier.c. TEST ONLY: remove together with the timing instrumentation. */
+#define WS_PERF_LOG(...) _er_log_debug (__VA_ARGS__)
+
 /*
  * log_writeset_clock_ns - monotonic wall clock in nanoseconds
  *
  * Note: TEST ONLY (writeset perf). Backs the collect/probe/flush/commit timing
- *       instrumentation; remove together with the perf er_log_debug lines.
+ *       instrumentation; remove together with the perf log lines.
  */
 UINT64
 log_writeset_clock_ns (void)
@@ -459,7 +465,7 @@ log_writeset_commit_probe (THREAD_ENTRY * thread_p, LOG_TDES * tdes, LOG_LSA * w
       LSA_COPY (ws_parent_out, &log_Writeset_prev_commit_lsa);
       /* TEST ONLY (writeset PoC 검증): overflow 트랜잭션은 commit-order 로 격하됨. dependency_seq 가
        * 직전 커밋을 그대로 가리키면 이 경로다(= 직렬화 배리어). 검증 후 제거. */
-      er_log_debug (ARG_FILE_LINE,
+      WS_PERF_LOG (ARG_FILE_LINE,
 		    "writeset probe trid=%d OVERFLOW->commit_order dependency_seq=%lld|%d (prev_commit=%lld|%d)\n",
 		    (tdes != NULL ? tdes->trid : -1), (long long) ws_parent_out->pageid, (int) ws_parent_out->offset,
 		    (long long) log_Writeset_prev_commit_lsa.pageid, (int) log_Writeset_prev_commit_lsa.offset);
@@ -511,7 +517,7 @@ log_writeset_commit_probe (THREAD_ENTRY * thread_p, LOG_TDES * tdes, LOG_LSA * w
   /* TEST ONLY (writeset PoC 검증): 이 트랜잭션의 최종 의존 라벨을 남긴다. release 에서도 er_log_debug=yes
    * 면 보인다. dependency_seq 가 NULL 이면 독립(병렬 가능), 직전 커밋을 가리키면 사실상 직렬.
    * ws_keys 는 이 트랜잭션이 건드린 행 수(중복 포함), history_start 는 현재 floor. 검증 후 제거. */
-  er_log_debug (ARG_FILE_LINE,
+  WS_PERF_LOG (ARG_FILE_LINE,
 		"writeset probe trid=%d ws_keys=%zu dependency_seq=%lld|%d (ws_parent=%lld|%d prev_commit=%lld|%d "
 		"history_start=%lld|%d) wkeys=%zu rkeys=%zu hits=%zu map_size=%zu probe_us=%llu collect_ns=%llu\n",
 		(tdes != NULL ? tdes->trid : -1),
@@ -621,7 +627,7 @@ log_writeset_commit_flush (THREAD_ENTRY * thread_p, LOG_TDES * tdes, const LOG_L
     }
 
   /* TEST ONLY (writeset perf): per-commit publish cost and history size */
-  er_log_debug (ARG_FILE_LINE, "writeset flush trid=%d flush_us=%llu published=%zu map_size=%zu\n",
+  WS_PERF_LOG (ARG_FILE_LINE, "writeset flush trid=%d flush_us=%llu published=%zu map_size=%zu\n",
 		tdes->trid, (unsigned long long) ((log_writeset_clock_ns () - perf_t0) / 1000), perf_published,
 		log_Writeset_history.map.size ());
 

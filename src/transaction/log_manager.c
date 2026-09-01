@@ -5309,9 +5309,11 @@ log_commit_local (THREAD_ENTRY * thread_p, LOG_TDES * tdes, bool retain_lock, bo
     }
 
 #if defined(SERVER_MODE) || defined(SA_MODE)
-  /* TEST ONLY (writeset perf) */
-  er_log_debug (ARG_FILE_LINE, "writeset perf trid=%d commit_total_us=%llu\n", tdes->trid,
-		(unsigned long long) ((log_writeset_clock_ns () - perf_commit_t0) / 1000));
+  /* TEST ONLY (writeset perf). _er_log_debug bypasses the er_log_debug parameter so the
+   * measurement prints in release builds without enabling every verbose debug log (same
+   * convention as LA_BENCH_TIMING_LOG in log_applier.c). */
+  _er_log_debug (ARG_FILE_LINE, "writeset perf trid=%d commit_total_us=%llu\n", tdes->trid,
+		 (unsigned long long) ((log_writeset_clock_ns () - perf_commit_t0) / 1000));
 #endif
 
   return tdes->state;
