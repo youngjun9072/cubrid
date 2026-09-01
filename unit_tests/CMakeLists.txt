@@ -38,6 +38,7 @@ option (UNIT_TEST_RESOURCE_TRACKER "Unit testing: resource tracker")
 option (UNIT_TEST_MONITOR "Unit testing: monitor")
 option (UNIT_TEST_LOADDB "Unit testing: loaddb module")
 option (UNIT_TEST_MEMORY_MONITOR "Unit testing: memory monitor")
+option (UNIT_TEST_LOG_WRITESET "Unit testing: writeset collection and commit history")
 
 message("  unit_tests/...")
 
@@ -102,6 +103,11 @@ if (UNIT_TESTS OR UNIT_TEST_MONITOR)
   message("    monitor")
   add_subdirectory(monitor)
 endif(UNIT_TESTS OR UNIT_TEST_MONITOR)
+
+if (UNIT_TESTS OR UNIT_TEST_LOG_WRITESET)
+  message("    log_writeset")
+  add_subdirectory(log_writeset)
+endif(UNIT_TESTS OR UNIT_TEST_LOG_WRITESET)
 
 #[[
 TODO compilation fails
