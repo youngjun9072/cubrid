@@ -21,6 +21,8 @@ project (test_log_writeset)
 set (TEST_LOG_WRITESET_SRC
   test_main.cpp
   test_log_writeset.cpp
+  test_log_writeset_bench.cpp
+  test_log_writeset_stress.cpp
   )
 
 SET_SOURCE_FILES_PROPERTIES(

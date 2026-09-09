@@ -26,95 +26,9 @@
  * integration bench (doc 6) can only observe mixed with workload contention.
  */
 
-#include "catch2/catch.hpp"
+#include "test_log_writeset_common.hpp"
 
-#include "dbtype.h"
-#include "log_impl.h"
-#include "log_writeset.h"
-#include "object_domain.h"
-#include "oid.h"
-
-namespace
-{
-  /* every case runs on a freshly initialized global history; initialize resets the
-   * map, history_start and the commit-order baseline, so cases stay isolated */
-  struct ws_history_guard
-  {
-    ws_history_guard ()
-    {
-      REQUIRE (log_writeset_history_initialize () == NO_ERROR);
-    }
-    ~ws_history_guard ()
-    {
-      log_writeset_history_finalize ();
-    }
-  };
-
-  LOG_LSA
-  lsa_of (INT64 pageid, short offset)
-  {
-    LOG_LSA lsa;
-
-    lsa.pageid = pageid;
-    lsa.offset = offset;
-    return lsa;
-  }
-
-  OID
-  oid_of (short volid, int pageid, short slotid)
-  {
-    OID oid;
-
-    oid.volid = volid;
-    oid.pageid = pageid;
-    oid.slotid = slotid;
-    return oid;
-  }
-
-  /* a transaction descriptor with only the writeset-related fields prepared;
-   * the writeset functions touch nothing else of log_tdes */
-  log_tdes *
-  make_tdes (int trid)
-  {
-    log_tdes *tdes = new log_tdes ();
-
-    tdes->trid = trid;
-    tdes->ws_hashes.clear ();
-    tdes->ws_overflow = false;
-    LSA_SET_NULL (&tdes->ws_dependency_seq);
-    tdes->ws_stat_collect_ns = 0;
-    return tdes;
-  }
-
-  void
-  add_write_int (log_tdes * tdes, const OID * cls, int key)
-  {
-    DB_VALUE pk;
-
-    db_make_int (&pk, key);
-    REQUIRE (log_writeset_add_dbvalue (NULL, tdes, cls, &pk) == NO_ERROR);
-  }
-
-  void
-  add_ref_int (log_tdes * tdes, const OID * parent_cls, int key)
-  {
-    DB_VALUE fk;
-    TP_DOMAIN *int_domain = tp_domain_resolve_default (DB_TYPE_INTEGER);
-
-    REQUIRE (int_domain != NULL);
-    db_make_int (&fk, key);
-    REQUIRE (log_writeset_add_ref_dbvalue (NULL, tdes, parent_cls, &fk, int_domain) == NO_ERROR);
-  }
-
-  LOG_LSA
-  probe (log_tdes * tdes)
-  {
-    LOG_LSA dep;
-
-    log_writeset_commit_probe (NULL, tdes, &dep);
-    return dep;
-  }
-}
+using namespace wstest;
 
 TEST_CASE ("independent transaction gets a NULL dependency", "[writeset]")
 {
@@ -355,77 +269,156 @@ TEST_CASE ("per-transaction key limit flips the transaction to overflow", "[writ
   delete t1;
 }
 
-TEST_CASE ("hash unit cost benchmarks", "[benchmark]")
+/* ------------------------------------------------------------------------- *
+ * Concurrency correctness (the single global latch must protect the map so
+ * concurrent commits produce the same slots as if they ran one at a time).
+ * Workers call only probe/flush; the writeset is collected up front on the
+ * main thread, so no worker touches the cast path (db_private_alloc / TLS
+ * THREAD_ENTRY). See test_log_writeset_stress.cpp for the timing sweeps.
+ * ------------------------------------------------------------------------- */
+
+TEST_CASE ("concurrent flushes on disjoint keys all publish (no lost update under the latch)", "[writeset]")
 {
   ws_history_guard history;
   OID cls = oid_of (1, 100, 1);
-  OID parent_cls = oid_of (1, 200, 1);
-  TP_DOMAIN *int_domain = tp_domain_resolve_default (DB_TYPE_INTEGER);
-  DB_VALUE v;
-  int seq = 0;
+  const int nthreads = 8;
+  const int per_thread = 500;
 
-  REQUIRE (int_domain != NULL);
-
-  log_tdes *scratch = make_tdes (900);
-
-  BENCHMARK ("WRITE add x1000 (pack+hash; read mean/1000 for per-key ns)")
-  {
-    for (int i = 0; i < 1000; i++)
-      {
-	db_make_int (&v, seq++);
-	log_writeset_add_dbvalue (NULL, scratch, &cls, &v);
-      }
-    scratch->ws_hashes.clear ();
-    return seq;
-  };
-
-  BENCHMARK ("REF add x1000 (cast+pack+hash; read mean/1000 for per-key ns)")
-  {
-    for (int i = 0; i < 1000; i++)
-      {
-	db_make_int (&v, seq++);
-	log_writeset_add_ref_dbvalue (NULL, scratch, &parent_cls, &v, int_domain);
-      }
-    scratch->ws_hashes.clear ();
-    return seq;
-  };
-
-  /* fill the history with 100k distinct keys so probe/flush run against a
-   * realistically loaded map */
-  {
-    log_tdes *filler = make_tdes (901);
-    LOG_LSA fill_lsa = lsa_of (100, 0);
-
-    for (int i = 0; i < 100000; i++)
-      {
-	db_make_int (&v, 1000000 + i);
-	log_writeset_add_dbvalue (NULL, filler, &cls, &v);
-      }
-    log_writeset_commit_flush (NULL, filler, &fill_lsa);
-    delete filler;
-  }
-
-  log_tdes *worker = make_tdes (902);
-  for (int i = 0; i < 1000; i++)
+  /* each thread flushes its own disjoint key range with a distinct commit LSA */
+  std::vector<log_tdes *> tx (nthreads);
+  for (int t = 0; t < nthreads; t++)
     {
-      db_make_int (&v, 1000000 + i);	/* all 1000 keys hit the map */
-      log_writeset_add_dbvalue (NULL, worker, &cls, &v);
+      tx[t] = make_tdes (t + 1);
+      for (int i = 0; i < per_thread; i++)
+	{
+	  add_write_int (tx[t], &cls, t * per_thread + i);
+	}
     }
 
-  LOG_LSA dep;
-  BENCHMARK ("probe x1000 keys vs 100k map (read mean/1000 for per-key ns)")
-  {
-    log_writeset_commit_probe (NULL, worker, &dep);
-    return dep.pageid;
-  };
+  std::vector<std::thread> workers;
+  for (int t = 0; t < nthreads; t++)
+    {
+      LOG_LSA commit = lsa_of (10 + t, 0);
+      workers.emplace_back ([tx, t, commit] ()
+	{
+	  log_writeset_commit_flush (NULL, tx[t], &commit);
+	});
+    }
+  for (auto &w : workers)
+    {
+      w.join ();
+    }
 
-  LOG_LSA flush_lsa = lsa_of (200, 0);
-  BENCHMARK ("flush x1000 keys vs 100k map (update; read mean/1000 for per-key ns)")
-  {
-    log_writeset_commit_flush (NULL, worker, &flush_lsa);
-    return 0;
-  };
+  /* every disjoint key from every thread must be present: nthreads * per_thread
+   * entries, none lost to a race on the map */
+  REQUIRE (log_Writeset_history.map.size () == (size_t) (nthreads * per_thread));
 
-  delete worker;
-  delete scratch;
+  for (int t = 0; t < nthreads; t++)
+    {
+      delete tx[t];
+    }
+}
+
+TEST_CASE ("concurrent siblings referencing one parent stay parallel", "[writeset]")
+{
+  ws_history_guard history;
+  OID parent_cls = oid_of (1, 200, 1);
+  LOG_LSA lp = lsa_of (10, 0);
+  const int nsiblings = 16;
+
+  /* parent published, then many children reference the same parent key */
+  log_tdes *parent = make_tdes (1);
+  add_write_int (parent, &parent_cls, 7);
+  log_writeset_commit_flush (NULL, parent, &lp);
+
+  std::vector<log_tdes *> child (nsiblings);
+  for (int i = 0; i < nsiblings; i++)
+    {
+      child[i] = make_tdes (100 + i);
+      add_ref_int (child[i], &parent_cls, 7);
+    }
+
+  /* all siblings probe concurrently; each must depend only on the parent's
+   * writer (references consult the write slot only), never on one another */
+  std::vector<LOG_LSA> dep (nsiblings);
+  std::vector<char> is_read (nsiblings);
+  std::vector<std::thread> workers;
+  for (int i = 0; i < nsiblings; i++)
+    {
+      workers.emplace_back ([&child, &dep, &is_read, i] ()
+	{
+	  LOG_LSA d;
+	  log_writeset_commit_probe (NULL, child[i], &d);
+	  dep[i] = d;
+	  is_read[i] = child[i]->ws_dependency_is_read;
+	});
+    }
+  for (auto &w : workers)
+    {
+      w.join ();
+    }
+
+  for (int i = 0; i < nsiblings; i++)
+    {
+      REQUIRE (LSA_EQ (&dep[i], &lp));
+      REQUIRE (!is_read[i]);
+      delete child[i];
+    }
+  delete parent;
+}
+
+TEST_CASE ("concurrent references then a parent write waits behind the newest referencer", "[writeset]")
+{
+  ws_history_guard history;
+  OID parent_cls = oid_of (1, 200, 1);
+  const int nsiblings = 16;
+  LOG_LSA lp = lsa_of (10, 0);
+
+  log_tdes *parent = make_tdes (1);
+  add_write_int (parent, &parent_cls, 7);
+  log_writeset_commit_flush (NULL, parent, &lp);
+
+  /* children flush references to the same parent concurrently, each with a
+   * distinct commit LSA; the newest among them is lseq(nsiblings) */
+  std::vector<log_tdes *> child (nsiblings);
+  LOG_LSA newest = lsa_of (0, 0);
+  for (int i = 0; i < nsiblings; i++)
+    {
+      child[i] = make_tdes (100 + i);
+      add_ref_int (child[i], &parent_cls, 7);
+      LOG_LSA c = lsa_of (20 + i, 0);
+      if (LSA_GT (&c, &newest))
+	{
+	  newest = c;
+	}
+    }
+
+  std::vector<std::thread> workers;
+  for (int i = 0; i < nsiblings; i++)
+    {
+      LOG_LSA commit = lsa_of (20 + i, 0);
+      workers.emplace_back ([&child, i, commit] ()
+	{
+	  log_writeset_commit_flush (NULL, child[i], &commit);
+	});
+    }
+  for (auto &w : workers)
+    {
+      w.join ();
+    }
+
+  /* a later write to the parent row must wait for the newest referencer (read
+   * slot holds the max under concurrent stamps: no lost update, monotonic) */
+  log_tdes *parent_delete = make_tdes (900);
+  add_write_int (parent_delete, &parent_cls, 7);
+  LOG_LSA dep = probe (parent_delete);
+  REQUIRE (LSA_EQ (&dep, &newest));
+  REQUIRE (parent_delete->ws_dependency_is_read);
+
+  for (int i = 0; i < nsiblings; i++)
+    {
+      delete child[i];
+    }
+  delete parent;
+  delete parent_delete;
 }
