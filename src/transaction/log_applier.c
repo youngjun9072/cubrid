@@ -506,6 +506,8 @@ struct la_info
   bool is_end_of_record;
   int last_server_state;
   bool is_role_changed;
+  UINT64 ws_label_missing_count;	/* writeset PoC drain: commits seen without a preceding LOG_DUMMY_WS_LABEL
+					 * for the same trid (see la_log_record_process LOG_COMMIT handling) */
 
   /* _db_ha_apply_info */
   LOG_LSA append_lsa;		/* append lsa of active log header */
@@ -623,6 +625,66 @@ static LA_DISPATCH_ORDER la_Dispatch_order;
 /* 리더가 부여하는 단조 증가 시퀀스.
  * 워커 결과를 out-of-order 로 회수하더라도 retire 는 이 순서대로만 수행한다. */
 static UINT64 la_dispatch_sequence = 0;
+
+/* Applied-transaction marker (crash-safety for parallel writeset apply).
+ *
+ * Parallel workers commit transactions to the slave out of commit order, so a
+ * restart can re-apply a commit whose LSA sits above the low-watermark that the
+ * per-transaction skip gate uses. When ha_applylogdb_applied_tx_marker is on,
+ * each worker records "this commit LSA has been applied" durably inside the very
+ * same slave transaction that applies the data, so the record and the mark
+ * survive or vanish together. On the next start the recorded set is loaded and
+ * the skip gate also drops any commit whose LSA is already marked. */
+#define LA_APPLIED_TX_MARKER_TABLE_NAME "ha_applied_tx_marker"
+
+typedef struct la_applied_tx_marker LA_APPLIED_TX_MARKER;
+struct la_applied_tx_marker
+{
+  LOG_LSA *lsa_set;		/* sorted commit LSAs loaded at start (read-only after load) */
+  int count;			/* number of valid entries in lsa_set */
+  bool table_ready;		/* marker table create/verify succeeded */
+};
+static LA_APPLIED_TX_MARKER la_Applied_tx_marker = { NULL, 0, false };
+
+/* Prune progress and PoC timing for the applied-tx marker.
+ * The marker table only needs entries at or above the replay-resume point
+ * (required_lsa). Rows below it are never consulted on restart, so they are
+ * pruned as the frontier advances and the table stays bounded by the parallel
+ * apply window instead of growing with the whole replicated history.
+ * la_Marker_insert_count is the size the table would reach without pruning, so a
+ * single run reports both costs and the space saved without a second run. */
+/* Pruning does an unindexed scan under the SQL compile mutex, so batch it on a
+ * minimum interval instead of running on every retire (required_lsa advances
+ * almost per transaction). The delete threshold is absolute, so a skipped cycle
+ * is cleaned up by the next one. */
+#define LA_MARKER_PRUNE_MIN_INTERVAL_NS (1000000000ULL)	/* 1 second */
+static UINT64 la_Marker_last_prune_clock_ns = 0;	/* la_clock_ns of the last prune pass */
+static LOG_LSA la_Marker_last_pruned_lsa;	/* highest required_lsa already pruned below */
+static UINT64 la_Marker_insert_count = 0;	/* markers written (= table size if never pruned) */
+static UINT64 la_Marker_insert_ns_total = 0;	/* accumulated time inside la_insert_applied_tx_marker */
+static UINT64 la_Marker_prune_ops = 0;		/* prune passes that actually deleted rows */
+static UINT64 la_Marker_prune_rows_total = 0;	/* rows deleted across all prunes */
+static UINT64 la_Marker_prune_ns_total = 0;	/* accumulated time inside la_prune_applied_tx_markers */
+
+/* writeset PoC drain: la_clock_ns of when the reader first noticed the drain wait for the current
+ * role change (0 = not currently waiting). Reset to 0 alongside every la_Info.is_role_changed = false
+ * (la_lock_dbname, la_unlock_dbname, la_init), so it always starts fresh for the next role change. */
+static UINT64 la_Drain_wait_start_ns = 0;
+
+/*
+ * la_clock_ns() - monotonic wall clock in nanoseconds
+ *
+ * Note: local to the client-side applier so the commit-region / marker timing
+ *       does not pull the server-only writeset perf clock into this library.
+ */
+static UINT64
+la_clock_ns (void)
+{
+  struct timespec ts;
+
+  clock_gettime (CLOCK_MONOTONIC, &ts);
+  return (UINT64) ts.tv_sec * 1000000000ULL + (UINT64) ts.tv_nsec;
+}
 
 #define LA_TIME_BEGIN(tv) gettimeofday (&(tv), NULL)
 #define LA_TIME_ACCUM_USEC(tv_begin, total_var) \
@@ -942,9 +1004,20 @@ static LA_ITEM *la_get_next_repl_item (LA_ITEM * item, bool is_long_trans, LOG_L
 static LA_ITEM *la_get_next_repl_item_from_list (LA_ITEM * item);
 static LA_ITEM *la_get_next_repl_item_from_log (LA_ITEM * item, LOG_LSA * last_lsa);
 
-static int la_commit_transaction (unsigned long long applied_item_count, UINT64 *db_commit_usec,
-				  UINT64 *post_commit_cleanup_usec);
+static int la_commit_transaction (unsigned long long applied_item_count, const LOG_LSA * commit_lsa,
+				  UINT64 *db_commit_usec, UINT64 *post_commit_cleanup_usec);
 static int la_find_last_deleted_arv_num (void);
+
+static bool la_applied_tx_marker_enabled (void);
+static int la_create_applied_tx_marker_table (void);
+static int la_insert_applied_tx_marker (const LOG_LSA * commit_lsa);
+static int la_prune_applied_tx_markers (const LOG_LSA * below, int *pruned_rows);
+static int la_load_applied_tx_markers (void);
+static bool la_applied_tx_marker_exists (const LOG_LSA * commit_lsa);
+static int la_clear_applied_tx_markers (void);
+
+static bool la_drain_enabled (void);
+static bool la_gate_drain_complete (void);
 
 static bool la_restart_on_bulk_flush_error (int errid);
 static char *la_get_hostname_from_log_path (char *log_path);
@@ -1898,6 +1971,23 @@ la_gate_init (void)
   }
 }
 
+/*
+ * la_gate_drain_complete() - whether the writeset dependency gate has no in-flight work left
+ *   return: true if nothing is parked, nothing is queued in the commit-order FIFO, and nothing
+ *           is waiting to be collected from a worker
+ *
+ * Note:
+ *   la_Gate_pending_head, la_Dispatch_order.count and la_Gate_order_head are only ever written by
+ *   the reader thread that also calls this, so reading them here without a lock is safe. Used by
+ *   la_change_state() to hold the DONE transition open until every transaction the reader already
+ *   let past the gate has actually finished (dispatched, applied, and collected).
+ */
+static bool
+la_gate_drain_complete (void)
+{
+  return (la_Gate_pending_head == NULL && la_Dispatch_order.count == 0 && la_Gate_order_head == NULL);
+}
+
 #if !defined (NDEBUG)
 static const char *
 la_debug_worker_stage_string (LA_WORKER_DEBUG_STAGE stage)
@@ -2652,12 +2742,35 @@ la_retire_ready_results (void)
       struct timeval _commit_apply_info_begin;
       LA_TIME_BEGIN (_commit_apply_info_begin);
 #endif /* !NDEBUG */
-      /* Persist _db_ha_apply_info (committed/committed_rep/required) at each
-       * transaction retire — the most accurate point, right after H-1 has fixed
-       * the frontier. la_reader_commit_apply_info() commits the transaction
-       * internally on success, so the standalone db_commit_transaction() that
-       * replaced it during bottleneck measurement is no longer needed. */
-      error = la_reader_commit_apply_info ();
+      /* Persist _db_ha_apply_info (committed/committed_rep/required) after the
+       * frontier is fixed, but NOT on every retire. In a mutual HA pair the peer
+       * node also runs an applier, and every commit this process makes on the
+       * local server is written to the local log and shipped back to the peer as
+       * an item-less commit for the peer to retire. Committing apply_info per
+       * retire therefore turns each incoming empty commit into a new outgoing
+       * commit, and the two appliers feed each other a self-sustaining stream of
+       * empty transactions (observed: millions of applied=0 commits per hour).
+       * Batch the persistence on the commit interval like the serial applier
+       * does; the periodic la_log_commit() path in the main loop flushes any
+       * advance that happens while this throttle is closed. A crash loses at
+       * most one interval of persisted progress, which only widens the restart
+       * re-apply window the applied-tx marker already covers. */
+      {
+	static UINT64 last_apply_info_commit_ns = 0;	/* reader thread only */
+	UINT64 now_ns = la_clock_ns ();
+	UINT64 interval_ns =
+	  (UINT64) prm_get_integer_value (PRM_ID_HA_APPLYLOGDB_MAX_COMMIT_INTERVAL_IN_MSECS) * 1000000ULL;
+
+	if (now_ns - last_apply_info_commit_ns >= interval_ns)
+	  {
+	    error = la_reader_commit_apply_info ();
+	    last_apply_info_commit_ns = now_ns;
+	  }
+	else
+	  {
+	    error = NO_ERROR;
+	  }
+      }
 #if !defined (NDEBUG)
       LA_TIME_ACCUM_USEC (_commit_apply_info_begin, la_Debug_progress.reader_commit_apply_info_usec_total);
       la_Debug_progress.reader_commit_apply_info_count_total++;
@@ -3487,6 +3600,35 @@ la_apply_worker_main (void *arg)
 	  applied_item_count =
 	    result.stats.insert_counter + result.stats.update_counter + result.stats.delete_counter + result.stats.fail_counter;
 	  worker_applied_item_count += applied_item_count;
+
+	  /* Crash-injection test hook: hold a transaction just before it commits so
+	   * a chosen class can be stalled while other workers commit past it, then a
+	   * kill leaves a deterministic gap of applied-but-uncommitted work. Inert
+	   * unless CUBRID_HA_TEST_BLOCK_CLASS names the last applied class, so it is
+	   * kept in release builds (like the worker-timing counters) and gated purely
+	   * by the environment variable. The stall length comes from
+	   * CUBRID_HA_TEST_BLOCK_MSEC (default 60000 ms). */
+	  {
+	    const char *block_class = getenv ("CUBRID_HA_TEST_BLOCK_CLASS");
+
+	    if (block_class != NULL && block_class[0] != '\0' && result.stats.last_class_name[0] != '\0'
+		&& strcmp (block_class, result.stats.last_class_name) == 0)
+	      {
+		const char *block_msec_str = getenv ("CUBRID_HA_TEST_BLOCK_MSEC");
+		int block_msec = (block_msec_str != NULL) ? atoi (block_msec_str) : 60000;
+
+		if (block_msec > 0)
+		  {
+		    _er_log_debug (ARG_FILE_LINE,
+				   "ws_marker TEST block before commit worker=%d trid=%d class=%s commit_lsa=%lld|%d "
+				   "block_msec=%d\n", (int) (worker - la_apply_Workers), task.tranid,
+				   result.stats.last_class_name, (long long) task.commit_lsa.pageid,
+				   (int) task.commit_lsa.offset, block_msec);
+		    usleep ((useconds_t) block_msec * 1000);
+		  }
+	      }
+	  }
+
 #if !defined (NDEBUG)
 	  LA_TIME_BEGIN (_commit_begin);
 	  la_Debug_worker_current_stage[worker_context.worker_idx] = LA_WORKER_STAGE_COMMIT;
@@ -3498,7 +3640,20 @@ la_apply_worker_main (void *arg)
 			result.stats.last_class_name[0] != '\0' ? result.stats.last_class_name : "<none>",
 			applied_item_count, worker_applied_item_count, result.stats.insert_counter,
 			result.stats.update_counter, result.stats.delete_counter, result.stats.fail_counter);
-	  result.error = la_commit_transaction (worker_applied_item_count, &db_commit_usec, &post_commit_cleanup_usec);
+	  /* Mark only transactions that actually changed the slave (rows applied,
+	   * schema applied, or failed items recorded). Empty commits and
+	   * transactions skipped as already committed/marked leave nothing on the
+	   * slave, so re-applying them after a restart is harmless and a marker
+	   * would only add rows and one serialized SQL INSERT per commit — in a
+	   * mutual HA pair that per-empty-commit cost is what let the echoed
+	   * empty-commit stream outrun the applier. Passing a NULL commit LSA
+	   * tells la_commit_transaction to commit without recording a marker. */
+	  bool tx_changed_slave = (result.stats.insert_counter + result.stats.update_counter
+				   + result.stats.delete_counter + result.stats.schema_counter
+				   + result.stats.fail_counter) > 0;
+	  result.error =
+	    la_commit_transaction (worker_applied_item_count, tx_changed_slave ? &task.commit_lsa : NULL,
+				   &db_commit_usec, &post_commit_cleanup_usec);
 #if !defined (NDEBUG)
 	  LA_TIME_ACCUM_USEC (_commit_begin, la_Debug_progress.worker_commit_usec_total[worker_context.worker_idx]);
 	  la_Debug_progress.worker_db_commit_usec_total[worker_context.worker_idx] += db_commit_usec;
@@ -3650,6 +3805,44 @@ la_reader_commit_apply_info (void)
   res = la_update_ha_last_applied_info ();
   if (res > 0)
     {
+      /* Prune markers the frontier has passed so the table stays bounded, and
+       * fold the delete into this same apply-info commit (no extra commit). Only
+       * runs when the marker is on and required_lsa advanced past the last prune. */
+      if (la_applied_tx_marker_enabled () && !LSA_ISNULL (&la_Info.required_lsa)
+	  && LSA_GT (&la_Info.required_lsa, &la_Marker_last_pruned_lsa)
+	  && (la_clock_ns () - la_Marker_last_prune_clock_ns) >= LA_MARKER_PRUNE_MIN_INTERVAL_NS)
+	{
+	  int pruned = 0;
+	  UINT64 prune_t0 = la_clock_ns ();
+
+	  (void) la_prune_applied_tx_markers (&la_Info.required_lsa, &pruned);
+	  la_Marker_prune_ns_total += la_clock_ns () - prune_t0;
+	  la_Marker_last_prune_clock_ns = prune_t0;
+	  LSA_COPY (&la_Marker_last_pruned_lsa, &la_Info.required_lsa);
+
+	  if (pruned > 0)
+	    {
+	      la_Marker_prune_ops++;
+	      la_Marker_prune_rows_total += (UINT64) pruned;
+	      /* Counters cover this run only (reset at start); the table may carry
+	       * rows from earlier runs, so prune_rows can exceed inserted. Report the
+	       * raw per-run counters and read the actual live size with an external
+	       * COUNT rather than deriving it here. inserted is what the table would
+	       * grow by this run without pruning. */
+	      LA_BENCH_TIMING_LOG (ARG_FILE_LINE,
+				   "ws_marker stats: inserted=%llu insert_us_total=%llu insert_avg_us=%.2f | "
+				   "prune_ops=%llu prune_rows=%llu prune_us_total=%llu prune_avg_us=%.2f\n",
+				   (unsigned long long) la_Marker_insert_count,
+				   (unsigned long long) (la_Marker_insert_ns_total / 1000),
+				   (la_Marker_insert_count > 0
+				    ? (double) la_Marker_insert_ns_total / 1000.0 / (double) la_Marker_insert_count : 0.0),
+				   (unsigned long long) la_Marker_prune_ops,
+				   (unsigned long long) la_Marker_prune_rows_total,
+				   (unsigned long long) (la_Marker_prune_ns_total / 1000),
+				   (la_Marker_prune_ops > 0
+				    ? (double) la_Marker_prune_ns_total / 1000.0 / (double) la_Marker_prune_ops : 0.0));
+	    }
+	}
       return db_commit_transaction ();
     }
 
@@ -9098,6 +9291,366 @@ la_update_query_execute_with_values (const char *sql, int arg_count, DB_VALUE * 
 }
 
 /*
+ * la_applied_tx_marker_enabled() - whether applied-transaction markers are on
+ *   return: true if ha_applylogdb_applied_tx_marker is set
+ */
+static bool
+la_applied_tx_marker_enabled (void)
+{
+  return prm_get_bool_value (PRM_ID_HA_APPLYLOGDB_APPLIED_TX_MARKER);
+}
+
+/*
+ * la_drain_enabled() - whether the writeset PoC drain (hold DONE until the gate empties) is on
+ *   return: true if ha_applylogdb_drain is set
+ *
+ * Note:
+ *   Every drain-related branch (C1 label-missing detection, the DONE gate in la_change_state,
+ *   and the backstop timeout) is guarded by this so the default (off) keeps today's behavior:
+ *   immediate DONE on role change, no drain wait. Failback marker cleanup (la_clear_applied_tx_markers)
+ *   is unconditional -- it is plain marker-table hygiene on reinit, not a drain state-machine change.
+ */
+static bool
+la_drain_enabled (void)
+{
+  return prm_get_bool_value (PRM_ID_HA_APPLYLOGDB_DRAIN);
+}
+
+/*
+ * la_create_applied_tx_marker_table() - create the marker table on the slave
+ *   return: NO_ERROR, or error code
+ *
+ * Note:
+ *   Called once during start on the reader connection. The table holds one row
+ *   per applied commit LSA so a restart can tell which out-of-order commits are
+ *   already durable. Uses IF NOT EXISTS so repeated starts are harmless.
+ */
+static int
+la_create_applied_tx_marker_table (void)
+{
+  int res;
+  char query_buf[LA_QUERY_BUF_SIZE];
+
+  snprintf (query_buf, sizeof (query_buf),
+	    "CREATE TABLE IF NOT EXISTS [%s] "
+	    "(commit_pageid BIGINT NOT NULL, commit_offset INTEGER NOT NULL);", LA_APPLIED_TX_MARKER_TABLE_NAME);
+
+  res = la_update_query_execute_with_values (query_buf, 0, NULL, true);
+  if (res < 0)
+    {
+      er_log_debug (ARG_FILE_LINE, "ws_marker create table failed res=%d", res);
+      return res;
+    }
+
+  /* DDL must be durable before workers begin marking, so settle it now. */
+  res = db_commit_transaction ();
+  if (res != NO_ERROR)
+    {
+      er_log_debug (ARG_FILE_LINE, "ws_marker create table commit failed res=%d", res);
+      return res;
+    }
+
+  la_Applied_tx_marker.table_ready = true;
+  LSA_SET_NULL (&la_Marker_last_pruned_lsa);
+  la_Marker_last_prune_clock_ns = 0;
+  la_Marker_insert_count = 0;
+  la_Marker_insert_ns_total = 0;
+  la_Marker_prune_ops = 0;
+  la_Marker_prune_rows_total = 0;
+  la_Marker_prune_ns_total = 0;
+  return NO_ERROR;
+}
+
+/*
+ * la_insert_applied_tx_marker() - record one applied commit LSA
+ *   return: NO_ERROR, or error code
+ *   commit_lsa(in): commit LSA of the transaction being applied
+ *
+ * Note:
+ *   Runs inside the worker's current slave transaction and does NOT commit; the
+ *   caller's db_commit_transaction() makes the marker and the applied data
+ *   durable atomically. Statement auto-commit is disabled by the shared execute
+ *   helper, so the INSERT stays in the open transaction.
+ */
+static int
+la_insert_applied_tx_marker (const LOG_LSA * commit_lsa)
+{
+#define LA_MARKER_IN_VALUE_COUNT 2
+  int res, i, in_value_idx;
+  char query_buf[LA_QUERY_BUF_SIZE];
+  DB_VALUE in_value[LA_MARKER_IN_VALUE_COUNT];
+
+  if (!la_Applied_tx_marker.table_ready)
+    {
+      return NO_ERROR;
+    }
+
+  snprintf (query_buf, sizeof (query_buf),
+	    "INSERT INTO [%s] (commit_pageid, commit_offset) VALUES (?, ?);", LA_APPLIED_TX_MARKER_TABLE_NAME);
+
+  in_value_idx = 0;
+  db_make_bigint (&in_value[in_value_idx++], commit_lsa->pageid);
+  db_make_int (&in_value[in_value_idx++], commit_lsa->offset);
+  assert (in_value_idx == LA_MARKER_IN_VALUE_COUNT);
+
+  res = la_update_query_execute_with_values (query_buf, in_value_idx, &in_value[0], true);
+
+  for (i = 0; i < in_value_idx; i++)
+    {
+      db_value_clear (&in_value[i]);
+    }
+
+  return (res < 0) ? res : NO_ERROR;
+#undef LA_MARKER_IN_VALUE_COUNT
+}
+
+/*
+ * la_prune_applied_tx_markers() - drop markers below the replay-resume point
+ *   return: NO_ERROR, or error code
+ *   below(in): prune markers whose commit LSA is strictly below this LSA
+ *   pruned_rows(out): number of rows deleted (may be NULL)
+ *
+ * Note:
+ *   A restart resumes replay from required_lsa, so a marker whose commit LSA is
+ *   below required_lsa can never be consulted again and is dead weight. Deleting
+ *   these keeps the table bounded by the parallel apply window rather than the
+ *   whole replicated history. Runs inside the reader's periodic apply-info
+ *   transaction and does NOT commit; the caller's commit makes the delete durable
+ *   together with the advanced apply-info, so no extra commit is added.
+ */
+static int
+la_prune_applied_tx_markers (const LOG_LSA * below, int *pruned_rows)
+{
+#define LA_PRUNE_IN_VALUE_COUNT 3
+  int res, i, in_value_idx;
+  char query_buf[LA_QUERY_BUF_SIZE];
+  DB_VALUE in_value[LA_PRUNE_IN_VALUE_COUNT];
+
+  if (pruned_rows != NULL)
+    {
+      *pruned_rows = 0;
+    }
+
+  if (!la_Applied_tx_marker.table_ready || below == NULL || LSA_ISNULL (below))
+    {
+      return NO_ERROR;
+    }
+
+  snprintf (query_buf, sizeof (query_buf),
+	    "DELETE FROM [%s] WHERE commit_pageid < ? OR (commit_pageid = ? AND commit_offset < ?);",
+	    LA_APPLIED_TX_MARKER_TABLE_NAME);
+
+  in_value_idx = 0;
+  db_make_bigint (&in_value[in_value_idx++], below->pageid);
+  db_make_bigint (&in_value[in_value_idx++], below->pageid);
+  db_make_int (&in_value[in_value_idx++], below->offset);
+  assert (in_value_idx == LA_PRUNE_IN_VALUE_COUNT);
+
+  res = la_update_query_execute_with_values (query_buf, in_value_idx, &in_value[0], true);
+
+  for (i = 0; i < in_value_idx; i++)
+    {
+      db_value_clear (&in_value[i]);
+    }
+
+  if (res < 0)
+    {
+      return res;
+    }
+
+  if (pruned_rows != NULL)
+    {
+      *pruned_rows = res;		/* affected row count from the DELETE */
+    }
+  return NO_ERROR;
+#undef LA_PRUNE_IN_VALUE_COUNT
+}
+
+/*
+ * la_clear_applied_tx_markers() - drop every row in the applied-tx marker table
+ *   return: NO_ERROR, or error code
+ *
+ * Note:
+ *   Called on failback (reinit_copylog: the peer's database was rebuilt and this applier
+ *   restarts replication from scratch). The markers on disk describe commits applied against
+ *   the pre-rebuild data, so they are meaningless once _db_ha_apply_info is wiped by
+ *   la_delete_ha_apply_info() right after this call; leaving them behind would let a later
+ *   restart mistake stale rows for already-applied commits from the new replication stream and
+ *   silently skip them. Modeled on la_prune_applied_tx_markers, but unconditional (no LSA floor)
+ *   since the whole table is invalidated. Runs inside la_delete_ha_apply_info()'s open transaction
+ *   and does NOT commit -- that function's existing db_commit_transaction() makes the marker wipe
+ *   durable together with the apply-info delete, so no extra commit is added.
+ */
+static int
+la_clear_applied_tx_markers (void)
+{
+  int res;
+  char query_buf[LA_QUERY_BUF_SIZE];
+
+  if (!la_Applied_tx_marker.table_ready)
+    {
+      return NO_ERROR;
+    }
+
+  snprintf (query_buf, sizeof (query_buf), "DELETE FROM [%s];", LA_APPLIED_TX_MARKER_TABLE_NAME);
+
+  res = la_update_query_execute_with_values (query_buf, 0, NULL, true);
+
+  return (res < 0) ? res : NO_ERROR;
+}
+
+/*
+ * la_marker_lsa_compare() - order two commit LSAs (pageid, then offset)
+ */
+static int
+la_marker_lsa_compare (const void *a, const void *b)
+{
+  const LOG_LSA *la = (const LOG_LSA *) a;
+  const LOG_LSA *lb = (const LOG_LSA *) b;
+
+  if (la->pageid != lb->pageid)
+    {
+      return (la->pageid < lb->pageid) ? -1 : 1;
+    }
+  if (la->offset != lb->offset)
+    {
+      return (la->offset < lb->offset) ? -1 : 1;
+    }
+  return 0;
+}
+
+/*
+ * la_load_applied_tx_markers() - load the marker set at start
+ *   return: NO_ERROR, or error code
+ *
+ * Note:
+ *   Reads every recorded commit LSA into a sorted array so the skip gate can
+ *   test membership with a binary search. Called on the reader connection after
+ *   the marker table exists and before the apply loop dispatches work, so the
+ *   array is read-only while workers run.
+ */
+static int
+la_load_applied_tx_markers (void)
+{
+  int error = NO_ERROR;
+  int au_save;
+  DB_QUERY_RESULT *result = NULL;
+  DB_QUERY_ERROR query_error;
+  char query_buf[LA_QUERY_BUF_SIZE];
+  int count = 0;
+  int idx = 0;
+  LOG_LSA *lsa_set = NULL;
+
+  if (la_Applied_tx_marker.lsa_set != NULL)
+    {
+      free_and_init (la_Applied_tx_marker.lsa_set);
+    }
+  la_Applied_tx_marker.count = 0;
+
+  if (!la_Applied_tx_marker.table_ready)
+    {
+      return NO_ERROR;
+    }
+
+  AU_DISABLE (au_save);
+
+  snprintf (query_buf, sizeof (query_buf),
+	    "SELECT commit_pageid, commit_offset FROM [%s];", LA_APPLIED_TX_MARKER_TABLE_NAME);
+
+  error = db_execute (query_buf, &result, &query_error);
+  if (error < 0)
+    {
+      er_log_debug (ARG_FILE_LINE, "ws_marker load query failed error=%d", error);
+      AU_ENABLE (au_save);
+      return error;
+    }
+
+  count = db_query_tuple_count (result);
+  if (count > 0)
+    {
+      lsa_set = (LOG_LSA *) malloc (sizeof (LOG_LSA) * count);
+      if (lsa_set == NULL)
+	{
+	  er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_OUT_OF_VIRTUAL_MEMORY, 1, sizeof (LOG_LSA) * count);
+	  (void) db_query_end (result);
+	  AU_ENABLE (au_save);
+	  return ER_OUT_OF_VIRTUAL_MEMORY;
+	}
+
+      error = db_query_first_tuple (result);
+      while (error == DB_CURSOR_SUCCESS && idx < count)
+	{
+	  DB_VALUE pageid_val, offset_val;
+
+	  if (db_query_get_tuple_value (result, 0, &pageid_val) != NO_ERROR
+	      || db_query_get_tuple_value (result, 1, &offset_val) != NO_ERROR)
+	    {
+	      error = ER_FAILED;
+	      break;
+	    }
+
+	  lsa_set[idx].pageid = (LOG_PAGEID) db_get_bigint (&pageid_val);
+	  lsa_set[idx].offset = (PGLENGTH) db_get_int (&offset_val);
+	  db_value_clear (&pageid_val);
+	  db_value_clear (&offset_val);
+	  idx++;
+
+	  error = db_query_next_tuple (result);
+	}
+
+      if (error == DB_CURSOR_SUCCESS || error == DB_CURSOR_END)
+	{
+	  error = NO_ERROR;
+	}
+    }
+
+  (void) db_query_end (result);
+  AU_ENABLE (au_save);
+
+  if (error != NO_ERROR)
+    {
+      if (lsa_set != NULL)
+	{
+	  free_and_init (lsa_set);
+	}
+      return error;
+    }
+
+  if (lsa_set != NULL && idx > 1)
+    {
+      qsort (lsa_set, idx, sizeof (LOG_LSA), la_marker_lsa_compare);
+    }
+
+  la_Applied_tx_marker.lsa_set = lsa_set;
+  la_Applied_tx_marker.count = idx;
+
+  er_log_debug (ARG_FILE_LINE, "ws_marker loaded %d applied-tx markers", idx);
+  return NO_ERROR;
+}
+
+/*
+ * la_applied_tx_marker_exists() - test whether a commit LSA is already marked
+ *   return: true if commit_lsa is in the loaded marker set
+ *   commit_lsa(in): commit LSA to look up
+ */
+static bool
+la_applied_tx_marker_exists (const LOG_LSA * commit_lsa)
+{
+  LOG_LSA key;
+
+  if (la_Applied_tx_marker.lsa_set == NULL || la_Applied_tx_marker.count == 0)
+    {
+      return false;
+    }
+
+  key.pageid = commit_lsa->pageid;
+  key.offset = commit_lsa->offset;
+
+  return bsearch (&key, la_Applied_tx_marker.lsa_set, la_Applied_tx_marker.count, sizeof (LOG_LSA),
+		  la_marker_lsa_compare) != NULL;
+}
+
+/*
  * la_apply_schema_log() - apply the schema log to the target slave
  *   return: NO_ERROR or error code
  *   item(in): replication item
@@ -9411,19 +9964,36 @@ la_apply_repl_log (LA_APPLY_WORKER_CONTEXT * context, LA_APPLY * apply, int rect
       return NO_ERROR;
     }
 
-  if (apply->head == NULL || LSA_LE (commit_lsa, &la_Info.last_committed_lsa))
-    {
-      /* 이미 적용된 트랜잭션이거나 빈 리스트면 아이템만 비우고 종료 (슬롯 정리는 리더) */
-      if (apply->head != NULL && LSA_LE (commit_lsa, &la_Info.last_committed_lsa))
-	{
-	  /* R3: the whole transaction is skipped here (already committed before this
-	   * process started). Log per transaction only — never per item. */
-	  er_log_debug (ARG_FILE_LINE, "ws_repl skip whole txn (already committed) trid %d commit_lsa %lld|%d",
-			apply->tranid, (long long int) commit_lsa->pageid, (int) commit_lsa->offset);
-	}
-      la_free_all_repl_items (apply);
-      return NO_ERROR;
-    }
+  {
+    bool already_committed = LSA_LE (commit_lsa, &la_Info.last_committed_lsa);
+    bool already_marked = false;
+
+    /* Parallel workers commit out of order, so a commit above the low-watermark
+     * may already be durable on the slave from a previous run. When markers are
+     * on, an exact-LSA hit in the loaded marker set means this transaction was
+     * applied and committed before; re-applying it would raise PK conflicts and
+     * inflate the failure counter, so skip it just like an already-committed one. */
+    if (apply->head != NULL && !already_committed && la_applied_tx_marker_exists (commit_lsa))
+      {
+	already_marked = true;
+      }
+
+    if (apply->head == NULL || already_committed || already_marked)
+      {
+	/* 이미 적용된 트랜잭션이거나 빈 리스트면 아이템만 비우고 종료 (슬롯 정리는 리더) */
+	if (apply->head != NULL && (already_committed || already_marked))
+	  {
+	    /* R3: the whole transaction is skipped here (already committed before this
+	     * process started, or found in the applied-tx marker set). Log per
+	     * transaction only — never per item. */
+	    er_log_debug (ARG_FILE_LINE, "ws_repl skip whole txn (%s) trid %d commit_lsa %lld|%d",
+			  already_marked ? "already marked" : "already committed", apply->tranid,
+			  (long long int) commit_lsa->pageid, (int) commit_lsa->offset);
+	  }
+	la_free_all_repl_items (apply);
+	return NO_ERROR;
+      }
+  }
 
   assert (rectype == LOG_COMMIT);
 
@@ -10121,6 +10691,24 @@ la_log_record_process (LOG_RECORD_HEADER * lrec, LOG_LSA * final, LOG_PAGE * pg_
 	    {
 	      LSA_SET_NULL (&task.dependency_seq);
 	      task.dependency_is_read = false;
+
+	      /* writeset PoC drain (C1): a commit with replicated items but no preceding WS_LABEL for
+	       * the same trid means this commit's dependency_seq could not be recovered, so the gate
+	       * let it through unordered. A commit with no items at all also lands in this branch
+	       * (see the comment above) and is not a label-missing case, so it must not be counted --
+	       * hence the task.apply->head check. Open item: whether the master always emits a
+	       * LOG_DUMMY_WS_LABEL ahead of every repl-bearing COMMIT is a master-side invariant this
+	       * file cannot confirm; if the master legitimately skips it in some path, this counter
+	       * will over-count. NOTIFICATION severity only -- this does not stop replication. */
+	      if (la_drain_enabled () && task.apply != NULL && task.apply->head != NULL)
+		{
+		  la_Info.ws_label_missing_count++;
+		  snprintf (buffer, sizeof (buffer),
+			    "writeset drain: commit trid=%d at %lld|%d has no preceding WS_LABEL; dependency_seq "
+			    "unknown, applied unordered (count=%llu)", lrec->trid, (long long) final->pageid,
+			    (int) final->offset, (unsigned long long) la_Info.ws_label_missing_count);
+		  er_set (ER_NOTIFICATION_SEVERITY, ARG_FILE_LINE, ER_HA_GENERIC_ERROR, 1, buffer);
+		}
 	    }
 
 	  /*프론티어는 첫 커밋 처리 직전 재시작 지점(la_Info.committed_lsa, 하위 전부 적용됨)으로
@@ -10349,6 +10937,17 @@ la_change_state (void)
 	case HA_SERVER_STATE_MAINTENANCE:
 	  if (la_Info.apply_state != HA_LOG_APPLIER_STATE_DONE)
 	    {
+	      /* writeset PoC drain (Hook A): with the drain on, hold DONE open while the dependency
+	       * gate still has work in flight (parked pending, dispatched-but-uncollected, or queued
+	       * in the commit-order FIFO). Setting DONE here would let the role-changed dbname-lock
+	       * release and the finalize block tear down repl_lists while workers are still applying,
+	       * corrupting slave state on a fast failback. Leaving new_state at NA keeps apply_state at
+	       * WORKING for one more pass; the backstop timeout covers a gate that never drains. */
+	      if (la_drain_enabled () && !la_gate_drain_complete ())
+		{
+		  break;
+		}
+
 	      /* notify to slave db */
 	      new_state = HA_LOG_APPLIER_STATE_DONE;
 
@@ -10525,7 +11124,8 @@ la_check_mem_size (void)
 }
 
 int
-la_commit_transaction (unsigned long long applied_item_count, UINT64 *db_commit_usec, UINT64 *post_commit_cleanup_usec)
+la_commit_transaction (unsigned long long applied_item_count, const LOG_LSA * commit_lsa, UINT64 *db_commit_usec,
+		       UINT64 *post_commit_cleanup_usec)
 {
   int error = NO_ERROR;
   static CUB_THREAD_LOCAL int last_time = 0;
@@ -10537,6 +11137,10 @@ la_commit_transaction (unsigned long long applied_item_count, UINT64 *db_commit_
   unsigned long ws_cull_mops_interval;
   unsigned long ws_cull_mops_per_apply;
   int start_time;
+  bool marker_on = la_applied_tx_marker_enabled ();
+  UINT64 marker_t0 = 0;
+  UINT64 marker_ns = 0;
+  UINT64 commit_region_t0;
 #if !defined (NDEBUG)
   struct timeval timer_begin;
 #endif /* !NDEBUG */
@@ -10561,6 +11165,27 @@ la_commit_transaction (unsigned long long applied_item_count, UINT64 *db_commit_
       last_applied_item = applied_item_count;
     }
 
+  /* Whole commit region (marker insert + db_commit) so the marker overhead can
+   * be read against the total. Uses a monotonic clock, and _er_log_debug so the
+   * line survives in release builds like the other writeset PoC timing. */
+  commit_region_t0 = la_clock_ns ();
+
+  /* Record the applied commit LSA inside this same transaction; the following
+   * db_commit_transaction() makes the data and the marker durable together. */
+  if (marker_on && commit_lsa != NULL)
+    {
+      marker_t0 = la_clock_ns ();
+      error = la_insert_applied_tx_marker (commit_lsa);
+      marker_ns = la_clock_ns () - marker_t0;
+      /* Workers run this in parallel, so accumulate atomically (PoC stats only). */
+      ATOMIC_INC_64 (&la_Marker_insert_ns_total, marker_ns);
+      ATOMIC_INC_64 (&la_Marker_insert_count, 1);
+      if (error != NO_ERROR)
+	{
+	  return error;
+	}
+    }
+
 #if !defined (NDEBUG)
   LA_TIME_BEGIN (timer_begin);
 #endif /* !NDEBUG */
@@ -10571,6 +11196,19 @@ la_commit_transaction (unsigned long long applied_item_count, UINT64 *db_commit_
       LA_TIME_ACCUM_USEC (timer_begin, *db_commit_usec);
     }
 #endif /* !NDEBUG */
+
+  /* Log only commits that recorded a marker (commit_lsa == NULL means the
+   * caller chose not to mark this transaction); empty commits are far more
+   * frequent than marked ones and a per-empty-commit line would swamp the log. */
+  if (marker_on && commit_lsa != NULL)
+    {
+      LA_BENCH_TIMING_LOG (ARG_FILE_LINE,
+			   "ws_marker commit trid=%d commit_lsa=%lld|%d commit_region_us=%llu marker_us=%llu err=%d\n",
+			   tm_Tran_index, (long long) commit_lsa->pageid, (int) commit_lsa->offset,
+			   (unsigned long long) ((la_clock_ns () - commit_region_t0) / 1000),
+			   (unsigned long long) (marker_ns / 1000), error);
+    }
+
   if (error != NO_ERROR)
     {
       return error;
@@ -10803,6 +11441,7 @@ la_lock_dbname (int *lockf_vdes, char *db_name, char *log_path)
   assert_release ((*lockf_vdes) != NULL_VOLDES);
 
   la_Info.is_role_changed = false;
+  la_Drain_wait_start_ns = 0;
 
   return error;
 }
@@ -10826,6 +11465,7 @@ la_unlock_dbname (int *lockf_vdes, char *db_name, bool clear_owner)
     }
 
   la_Info.is_role_changed = false;
+  la_Drain_wait_start_ns = 0;
 
   if (clear_owner)
     {
@@ -10862,6 +11502,7 @@ la_init (const char *log_path, const int max_mem_size)
 
   la_Info.last_deleted_archive_num = -1;
   la_Info.is_role_changed = false;
+  la_Drain_wait_start_ns = 0;
   la_Info.is_apply_info_updated = false;
 
 #if !defined (NDEBUG)
@@ -10935,6 +11576,14 @@ la_shutdown (void)
 #if !defined (NDEBUG)
   la_log_parallel_apply_window ("shutdown");
 #endif /* !NDEBUG */
+
+  /* release the loaded applied-tx marker set (safe when never allocated) */
+  if (la_Applied_tx_marker.lsa_set != NULL)
+    {
+      free_and_init (la_Applied_tx_marker.lsa_set);
+    }
+  la_Applied_tx_marker.count = 0;
+  la_Applied_tx_marker.table_ready = false;
 
   /* clean up */
   if (la_Info.arv_log.log_vdes != NULL_VOLDES)
@@ -12154,6 +12803,23 @@ la_apply_log_file (const char *database_name, const char *log_path, const int ma
       return error;
     }
 
+  /* Applied-transaction markers: make the table durable and load the recorded
+   * commit LSAs before the apply loop dispatches work, so the skip gate can drop
+   * out-of-order commits that a previous run already committed on the slave.
+   * A marker setup failure is non-fatal — fall back to the plain low-watermark
+   * gate rather than stopping replication. */
+  if (la_applied_tx_marker_enabled ())
+    {
+      if (la_create_applied_tx_marker_table () != NO_ERROR)
+	{
+	  er_log_debug (ARG_FILE_LINE, "ws_marker table setup failed; applied-tx marker gate disabled for this run");
+	}
+      else if (la_load_applied_tx_markers () != NO_ERROR)
+	{
+	  er_log_debug (ARG_FILE_LINE, "ws_marker load failed; applied-tx marker gate disabled for this run");
+	}
+    }
+
   la_init_delay_history (delay_hist);
 
   time_commit_interval = prm_get_integer_value (PRM_ID_HA_APPLYLOGDB_MAX_COMMIT_INTERVAL_IN_MSECS);
@@ -12759,6 +13425,34 @@ la_apply_log_file (const char *database_name, const char *log_path, const int ma
 	  /* there is no something new */
 	  if (LSA_EQ (&old_lsa, &la_Info.final_lsa))
 	    {
+	      /* writeset PoC drain backstop: la_change_state() (Hook A) holds DONE open while the
+	       * gate still has work in flight. If that work never finishes -- a stuck/dead worker,
+	       * a lost wakeup -- the applier would otherwise idle-poll here forever without ever
+	       * reaching DONE. Cap the wait so a hung drain surfaces as a restart instead of a
+	       * silent hang; the restart is safe because applied-tx markers make replay idempotent. */
+	      if (la_drain_enabled () && la_Info.is_role_changed == true && !la_gate_drain_complete ())
+		{
+		  if (la_Drain_wait_start_ns == 0)
+		    {
+		      la_Drain_wait_start_ns = la_clock_ns ();
+		    }
+		  else if ((la_clock_ns () - la_Drain_wait_start_ns) / 1000000ULL
+			   > (UINT64) prm_get_integer_value (PRM_ID_HA_APPLYLOGDB_DRAIN_TIMEOUT_MSEC))
+		    {
+		      char buffer[256];
+
+		      snprintf (buffer, sizeof (buffer),
+				"writeset drain: gate did not drain within %d msec (pending=%d dispatch_order=%d "
+				"order_fifo=%d); giving up and restarting",
+				prm_get_integer_value (PRM_ID_HA_APPLYLOGDB_DRAIN_TIMEOUT_MSEC),
+				(la_Gate_pending_head != NULL), la_Dispatch_order.count, (la_Gate_order_head != NULL));
+		      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_HA_GENERIC_ERROR, 1, buffer);
+
+		      la_applier_need_shutdown = true;
+		      break;
+		    }
+		}
+
 	      usleep (100 * 1000);
 	      continue;
 	    }
@@ -12792,6 +13486,9 @@ la_apply_log_file (const char *database_name, const char *log_path, const int ma
     {
       char error_str[LINE_MAX];
 
+      /* writeset PoC drain: wipe markers from the pre-rebuild data before wiping apply-info
+       * itself, so both land in la_delete_ha_apply_info()'s single commit below. */
+      (void) la_clear_applied_tx_markers ();
       la_delete_ha_apply_info ();
       (void) la_update_last_deleted_arv_num (la_Info.log_path_lockf_vdes, -1);
 
