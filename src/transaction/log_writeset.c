@@ -36,6 +36,7 @@
 #include "object_domain.h"
 #include "object_primitive.h"
 #include "object_representation.h"
+#include "language_support.h"
 #include "porting.h"
 
 #include "memory_wrapper.hpp"	// XXX: SHOULD BE THE LAST INCLUDE HEADER
@@ -80,6 +81,9 @@ static int log_writeset_add_ref_dbvalue_internal (THREAD_ENTRY * thread_p, LOG_T
 						  DB_VALUE * fk_value, struct tp_domain *parent_pk_domain);
 static int log_writeset_push (THREAD_ENTRY * thread_p, LOG_TDES * tdes, const OID * class_oid, const char *packed,
 			      int len, LOG_WRITESET_KIND kind);
+static int log_writeset_push_hash (THREAD_ENTRY * thread_p, LOG_TDES * tdes, const OID * class_oid, UINT64 hash,
+				   LOG_WRITESET_KIND kind);
+static bool log_writeset_string_hash (const OID * class_oid, DB_VALUE * v, UINT64 * hash_out);
 #if !defined (NDEBUG)
 static void log_writeset_selfcheck_packing (void);
 #endif /* !NDEBUG */
@@ -112,6 +116,61 @@ log_writeset_fnv1a (const OID * class_oid, const char *packed, int len)
     }
 
   return hash;
+}
+
+/*
+ * log_writeset_string_hash - collation-aware writeset hash for a character-string key.
+ *
+ *   class_oid(in): class OID the key belongs to (row's class for WRITE, parent class for REF)
+ *   v(in): key value
+ *   hash_out(out): writeset hash, valid only when the function returns true
+ *
+ * return: true if v is a character string and the collation-aware hash was produced;
+ *         false if the caller must fall back to the packed-byte hash.
+ *
+ * The b-tree enforces UNIQUE/PK identity by collation: a case-insensitive collation
+ * (e.g. utf8_en_ci) treats 'abc' and 'ABC' as the same key. Hashing the raw string
+ * bytes would make two collation-equal keys look independent, letting the slave reorder
+ * them (a silently skipped constraint violation = divergence). The per-collation pseudo
+ * key (mht2str, the same one the engine's hash operators use) maps collation-equal
+ * strings to one value, so it is folded into the hash instead of the raw bytes. WRITE and
+ * REF keys go through this same helper so a child FK reference collides with the parent's
+ * WRITE key exactly when they are collation-equal.
+ */
+static bool
+log_writeset_string_hash (const OID * class_oid, DB_VALUE * v, UINT64 * hash_out)
+{
+  DB_TYPE vtype = DB_VALUE_DOMAIN_TYPE (v);
+  LANG_COLLATION *lc;
+  const unsigned char *s;
+  int slen;
+  unsigned int pseudo;
+  unsigned char pbytes[5];
+
+  if (!(vtype == DB_TYPE_VARCHAR || vtype == DB_TYPE_CHAR) || DB_IS_NULL (v))
+    {
+      return false;
+    }
+
+  lc = lang_get_collation (db_get_string_collation (v));
+  s = (const unsigned char *) db_get_string (v);
+  slen = db_get_string_size (v);
+  if (lc == NULL || lc->mht2str == NULL || s == NULL || slen < 0)
+    {
+      return false;
+    }
+
+  pseudo = lc->mht2str (lc, s, slen);
+
+  /* 0xC5 tag keeps a string pseudo key from colliding with a numeric key that
+   * might pack to the same four bytes on the same class. */
+  pbytes[0] = 0xC5;
+  pbytes[1] = (unsigned char) (pseudo & 0xff);
+  pbytes[2] = (unsigned char) ((pseudo >> 8) & 0xff);
+  pbytes[3] = (unsigned char) ((pseudo >> 16) & 0xff);
+  pbytes[4] = (unsigned char) ((pseudo >> 24) & 0xff);
+  *hash_out = log_writeset_fnv1a (class_oid, (const char *) pbytes, 5);
+  return true;
 }
 
 /*
@@ -164,8 +223,8 @@ log_writeset_history_finalize (void)
  *       transaction is marked to be committed in commit order (ws_overflow).
  */
 static int
-log_writeset_push (THREAD_ENTRY * thread_p, LOG_TDES * tdes, const OID * class_oid, const char *packed, int len,
-		   LOG_WRITESET_KIND kind)
+log_writeset_push_hash (THREAD_ENTRY * thread_p, LOG_TDES * tdes, const OID * class_oid, UINT64 hash,
+			LOG_WRITESET_KIND kind)
 {
   LOG_WRITESET_ENTRY entry;
 
@@ -200,16 +259,36 @@ log_writeset_push (THREAD_ENTRY * thread_p, LOG_TDES * tdes, const OID * class_o
       return NO_ERROR;
     }
 
-  entry.hash = log_writeset_fnv1a (class_oid, packed, len);
+  entry.hash = hash;
   entry.kind = kind;
   tdes->ws_hashes.push_back (entry);
 
   /* TEST ONLY (writeset PoC 검증): 수집한 해시를 서버 에러로그로 남긴다. 검증 후 제거할 것. */
   er_log_debug (ARG_FILE_LINE, "writeset insert hash: trid=%d kind=%s class=%d|%d|%d packed_len=%d hash=%016llx\n",
 		tdes->trid, (kind == LOG_WRITESET_KIND_REF ? "REF" : "WRITE"), (int) class_oid->volid,
-		(int) class_oid->pageid, (int) class_oid->slotid, len, (unsigned long long) entry.hash);
+		(int) class_oid->pageid, (int) class_oid->slotid, -1, (unsigned long long) entry.hash);
 
   return NO_ERROR;
+}
+
+static int
+log_writeset_push (THREAD_ENTRY * thread_p, LOG_TDES * tdes, const OID * class_oid, const char *packed, int len,
+		   LOG_WRITESET_KIND kind)
+{
+  UINT64 h;
+
+  if (tdes == NULL || class_oid == NULL)
+    {
+      return NO_ERROR;
+    }
+
+  if (tdes->ws_overflow)
+    {
+      return NO_ERROR;
+    }
+
+  h = log_writeset_fnv1a (class_oid, packed, len);
+  return log_writeset_push_hash (thread_p, tdes, class_oid, h, kind);
 }
 
 /*
@@ -255,6 +334,14 @@ log_writeset_add_dbvalue_internal (THREAD_ENTRY * thread_p, LOG_TDES * tdes, con
     {
       return NO_ERROR;
     }
+
+  {
+    UINT64 shash;
+    if (log_writeset_string_hash (class_oid, pk, &shash))
+      {
+	return log_writeset_push_hash (thread_p, tdes, class_oid, shash, LOG_WRITESET_KIND_WRITE);
+      }
+  }
 
   buf_len = OR_VALUE_ALIGNED_SIZE (pk);
   if (buf_len <= 0)
@@ -387,6 +474,15 @@ log_writeset_add_ref_dbvalue_internal (THREAD_ENTRY * thread_p, LOG_TDES * tdes,
       pr_clear_value (&casted);
       return NO_ERROR;
     }
+
+  {
+    UINT64 shash;
+    if (log_writeset_string_hash (ref_class_oid, &casted, &shash))
+      {
+	pr_clear_value (&casted);
+	return log_writeset_push_hash (thread_p, tdes, ref_class_oid, shash, LOG_WRITESET_KIND_REF);
+      }
+  }
 
   buf_len = OR_VALUE_ALIGNED_SIZE (&casted);
   if (buf_len <= 0)
