@@ -425,7 +425,6 @@ static const char sysprm_ha_conf_file_name[] = "cubrid_ha.conf";
 
 #define PRM_NAME_HA_APPLYLOGDB_MAX_COMMIT_INTERVAL "ha_applylogdb_max_commit_interval"
 
-#define PRM_NAME_HA_APPLYLOGDB_APPLIED_TX_MARKER "ha_applylogdb_applied_tx_marker"
 
 #define PRM_NAME_HA_APPLYLOGDB_DRAIN "ha_applylogdb_drain"
 
@@ -5331,17 +5330,6 @@ SYSPRM_PARAM prm_Def[] = {
    {false, {.i = 512}},
    {false, {.i = 4096}},
    {false, {.i = 4}},
-   (char *) NULL,
-   (DUP_PRM_FUNC) NULL,
-   (DUP_PRM_FUNC) NULL},
-  {PRM_ID_HA_APPLYLOGDB_APPLIED_TX_MARKER,
-   PRM_NAME_HA_APPLYLOGDB_APPLIED_TX_MARKER,
-   (PRM_FOR_CLIENT | PRM_FOR_HA | PRM_HIDDEN),
-   PRM_BOOLEAN,
-   PRM_CLEAR_DYNAMIC_FLAG,
-   {false, {.b = false}},
-   {false, {.b = false}},
-   NULL_SYSPRM_PARAM_VALUE, NULL_SYSPRM_PARAM_VALUE,
    (char *) NULL,
    (DUP_PRM_FUNC) NULL,
    (DUP_PRM_FUNC) NULL},
