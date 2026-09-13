@@ -26,18 +26,43 @@
 
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <pthread.h>
 
 #include "log_writeset.h"
 
 #include "error_manager.h"
 #include "log_impl.h"
+#include "object_domain.h"
+#include "object_primitive.h"
 #include "object_representation.h"
+#include "language_support.h"
 #include "porting.h"
 
 #include "memory_wrapper.hpp"	// XXX: SHOULD BE THE LAST INCLUDE HEADER
 
 #if defined(SERVER_MODE) || defined(SA_MODE)
+
+/* Perf measurement logs must reach the error log in release builds without turning on the global
+ * er_log_debug parameter (which would enable every verbose debug log and disturb the measurement):
+ * _er_log_debug bypasses PRM_ID_ER_LOG_DEBUG. Same convention as LA_BENCH_TIMING_LOG in
+ * log_applier.c. TEST ONLY: remove together with the timing instrumentation. */
+#define WS_PERF_LOG(...) _er_log_debug (__VA_ARGS__)
+
+/*
+ * log_writeset_clock_ns - monotonic wall clock in nanoseconds
+ *
+ * Note: TEST ONLY (writeset perf). Backs the collect/probe/flush/commit timing
+ *       instrumentation; remove together with the perf log lines.
+ */
+UINT64
+log_writeset_clock_ns (void)
+{
+  struct timespec ts;
+
+  clock_gettime (CLOCK_MONOTONIC, &ts);
+  return (UINT64) ts.tv_sec * 1000000000ULL + (UINT64) ts.tv_nsec;
+}
 
 /* FNV-1a 64-bit constants */
 #define LOG_WRITESET_FNV_OFFSET_BASIS ((UINT64) 0xcbf29ce484222325ULL)
@@ -50,6 +75,18 @@ LOG_WRITESET_HISTORY log_Writeset_history;
 static LOG_LSA log_Writeset_prev_commit_lsa;
 
 static UINT64 log_writeset_fnv1a (const OID * class_oid, const char *packed, int len);
+static int log_writeset_add_dbvalue_internal (THREAD_ENTRY * thread_p, LOG_TDES * tdes, const OID * class_oid,
+					      DB_VALUE * pk);
+static int log_writeset_add_ref_dbvalue_internal (THREAD_ENTRY * thread_p, LOG_TDES * tdes, const OID * ref_class_oid,
+						  DB_VALUE * fk_value, struct tp_domain *parent_pk_domain);
+static int log_writeset_push (THREAD_ENTRY * thread_p, LOG_TDES * tdes, const OID * class_oid, const char *packed,
+			      int len, LOG_WRITESET_KIND kind);
+static int log_writeset_push_hash (THREAD_ENTRY * thread_p, LOG_TDES * tdes, const OID * class_oid, UINT64 hash,
+				   LOG_WRITESET_KIND kind);
+static bool log_writeset_string_hash (const OID * class_oid, DB_VALUE * v, UINT64 * hash_out);
+#if !defined (NDEBUG)
+static void log_writeset_selfcheck_packing (void);
+#endif /* !NDEBUG */
 
 /*
  * log_writeset_fnv1a - FNV-1a 64-bit hash over class_oid (8 bytes) + packed key
@@ -79,6 +116,61 @@ log_writeset_fnv1a (const OID * class_oid, const char *packed, int len)
     }
 
   return hash;
+}
+
+/*
+ * log_writeset_string_hash - collation-aware writeset hash for a character-string key.
+ *
+ *   class_oid(in): class OID the key belongs to (row's class for WRITE, parent class for REF)
+ *   v(in): key value
+ *   hash_out(out): writeset hash, valid only when the function returns true
+ *
+ * return: true if v is a character string and the collation-aware hash was produced;
+ *         false if the caller must fall back to the packed-byte hash.
+ *
+ * The b-tree enforces UNIQUE/PK identity by collation: a case-insensitive collation
+ * (e.g. utf8_en_ci) treats 'abc' and 'ABC' as the same key. Hashing the raw string
+ * bytes would make two collation-equal keys look independent, letting the slave reorder
+ * them (a silently skipped constraint violation = divergence). The per-collation pseudo
+ * key (mht2str, the same one the engine's hash operators use) maps collation-equal
+ * strings to one value, so it is folded into the hash instead of the raw bytes. WRITE and
+ * REF keys go through this same helper so a child FK reference collides with the parent's
+ * WRITE key exactly when they are collation-equal.
+ */
+static bool
+log_writeset_string_hash (const OID * class_oid, DB_VALUE * v, UINT64 * hash_out)
+{
+  DB_TYPE vtype = DB_VALUE_DOMAIN_TYPE (v);
+  LANG_COLLATION *lc;
+  const unsigned char *s;
+  int slen;
+  unsigned int pseudo;
+  unsigned char pbytes[5];
+
+  if (!(vtype == DB_TYPE_VARCHAR || vtype == DB_TYPE_CHAR) || DB_IS_NULL (v))
+    {
+      return false;
+    }
+
+  lc = lang_get_collation (db_get_string_collation (v));
+  s = (const unsigned char *) db_get_string (v);
+  slen = db_get_string_size (v);
+  if (lc == NULL || lc->mht2str == NULL || s == NULL || slen < 0)
+    {
+      return false;
+    }
+
+  pseudo = lc->mht2str (lc, s, slen);
+
+  /* 0xC5 tag keeps a string pseudo key from colliding with a numeric key that
+   * might pack to the same four bytes on the same class. */
+  pbytes[0] = 0xC5;
+  pbytes[1] = (unsigned char) (pseudo & 0xff);
+  pbytes[2] = (unsigned char) ((pseudo >> 8) & 0xff);
+  pbytes[3] = (unsigned char) ((pseudo >> 16) & 0xff);
+  pbytes[4] = (unsigned char) ((pseudo >> 24) & 0xff);
+  *hash_out = log_writeset_fnv1a (class_oid, (const char *) pbytes, 5);
+  return true;
 }
 
 /*
@@ -116,22 +208,25 @@ log_writeset_history_finalize (void)
 }
 
 /*
- * log_writeset_add_key - add a distinct writeset key hash to the transaction
+ * log_writeset_push - hash a packed key and append it to the transaction's writeset
  *
  *   tdes(in/out): transaction descriptor
- *   class_oid(in): class OID of the modified instance
- *   packed(in): packed primary key image
+ *   class_oid(in): class OID whose identity the key belongs to (the modified row's class for
+ *                  WRITE keys, the referenced parent class for FK REF keys)
+ *   packed(in): packed key image
  *   len(in): length of the packed image
+ *   kind(in): WRITE (this transaction owns the key) or REF (foreign-key reference only)
  *
  * return: NO_ERROR, or ER_OUT_OF_VIRTUAL_MEMORY on allocation failure
  *
  * Note: On per-tx limit overflow the collected writeset is dropped and the
  *       transaction is marked to be committed in commit order (ws_overflow).
  */
-int
-log_writeset_add_key (THREAD_ENTRY * thread_p, LOG_TDES * tdes, const OID * class_oid, const char *packed, int len)
+static int
+log_writeset_push_hash (THREAD_ENTRY * thread_p, LOG_TDES * tdes, const OID * class_oid, UINT64 hash,
+			LOG_WRITESET_KIND kind)
 {
-  LOG_WRITESET_HASH hash;
+  LOG_WRITESET_ENTRY entry;
 
   if (tdes == NULL || class_oid == NULL)
     {
@@ -149,7 +244,8 @@ log_writeset_add_key (THREAD_ENTRY * thread_p, LOG_TDES * tdes, const OID * clas
    *   2. 슬레이브 게이트가 그걸 믿고 잘못 병렬화 -> 같은 행 순서가 붕괴한다.
    *   3. 호출부가 반환값을 (void) 로 무시하므로 이 오류는 조용히 발생한다.
    * 그래서 per-tx 한도를 넘기면 부분 writeset 을 통째로 버리고 commit-order 로 격하한다
-   * (= MySQL has_missing_keys). PoC 단순화 대상이 아니다 - 제거 금지. */
+   * (= MySQL has_missing_keys). REF 해시도 tdes->ws_hashes 메모리를 쓰므로 함께 센다.
+   * PoC 단순화 대상이 아니다 - 제거 금지. */
   if (tdes->ws_hashes.size () >= LOG_WRITESET_TX_LIMIT)
     {
       /* per-tx limit reached: drop writeset, degrade to commit order */
@@ -163,15 +259,52 @@ log_writeset_add_key (THREAD_ENTRY * thread_p, LOG_TDES * tdes, const OID * clas
       return NO_ERROR;
     }
 
-  hash = log_writeset_fnv1a (class_oid, packed, len);
-  tdes->ws_hashes.push_back (hash);
+  entry.hash = hash;
+  entry.kind = kind;
+  tdes->ws_hashes.push_back (entry);
 
   /* TEST ONLY (writeset PoC 검증): 수집한 해시를 서버 에러로그로 남긴다. 검증 후 제거할 것. */
-  er_log_debug (ARG_FILE_LINE, "writeset insert hash: trid=%d class=%d|%d|%d packed_len=%d hash=%016llx\n",
-		tdes->trid, (int) class_oid->volid, (int) class_oid->pageid, (int) class_oid->slotid, len,
-		(unsigned long long) hash);
+  er_log_debug (ARG_FILE_LINE, "writeset insert hash: trid=%d kind=%s class=%d|%d|%d packed_len=%d hash=%016llx\n",
+		tdes->trid, (kind == LOG_WRITESET_KIND_REF ? "REF" : "WRITE"), (int) class_oid->volid,
+		(int) class_oid->pageid, (int) class_oid->slotid, -1, (unsigned long long) entry.hash);
 
   return NO_ERROR;
+}
+
+static int
+log_writeset_push (THREAD_ENTRY * thread_p, LOG_TDES * tdes, const OID * class_oid, const char *packed, int len,
+		   LOG_WRITESET_KIND kind)
+{
+  UINT64 h;
+
+  if (tdes == NULL || class_oid == NULL)
+    {
+      return NO_ERROR;
+    }
+
+  if (tdes->ws_overflow)
+    {
+      return NO_ERROR;
+    }
+
+  h = log_writeset_fnv1a (class_oid, packed, len);
+  return log_writeset_push_hash (thread_p, tdes, class_oid, h, kind);
+}
+
+/*
+ * log_writeset_add_key - add a distinct writeset WRITE key hash to the transaction
+ *
+ *   tdes(in/out): transaction descriptor
+ *   class_oid(in): class OID of the modified instance
+ *   packed(in): packed primary key image
+ *   len(in): length of the packed image
+ *
+ * return: NO_ERROR, or ER_OUT_OF_VIRTUAL_MEMORY on allocation failure
+ */
+int
+log_writeset_add_key (THREAD_ENTRY * thread_p, LOG_TDES * tdes, const OID * class_oid, const char *packed, int len)
+{
+  return log_writeset_push (thread_p, tdes, class_oid, packed, len, LOG_WRITESET_KIND_WRITE);
 }
 
 /*
@@ -183,8 +316,8 @@ log_writeset_add_key (THREAD_ENTRY * thread_p, LOG_TDES * tdes, const OID * clas
  *
  * return: NO_ERROR, or an error code on failure
  */
-int
-log_writeset_add_dbvalue (THREAD_ENTRY * thread_p, LOG_TDES * tdes, const OID * class_oid, DB_VALUE * pk)
+static int
+log_writeset_add_dbvalue_internal (THREAD_ENTRY * thread_p, LOG_TDES * tdes, const OID * class_oid, DB_VALUE * pk)
 {
   char *buf = NULL;
   char *ptr;
@@ -201,6 +334,14 @@ log_writeset_add_dbvalue (THREAD_ENTRY * thread_p, LOG_TDES * tdes, const OID * 
     {
       return NO_ERROR;
     }
+
+  {
+    UINT64 shash;
+    if (log_writeset_string_hash (class_oid, pk, &shash))
+      {
+	return log_writeset_push_hash (thread_p, tdes, class_oid, shash, LOG_WRITESET_KIND_WRITE);
+      }
+  }
 
   buf_len = OR_VALUE_ALIGNED_SIZE (pk);
   if (buf_len <= 0)
@@ -235,6 +376,163 @@ log_writeset_add_dbvalue (THREAD_ENTRY * thread_p, LOG_TDES * tdes, const OID * 
   return error;
 }
 
+int
+log_writeset_add_dbvalue (THREAD_ENTRY * thread_p, LOG_TDES * tdes, const OID * class_oid, DB_VALUE * pk)
+{
+  UINT64 perf_t0 = log_writeset_clock_ns ();
+  int error = log_writeset_add_dbvalue_internal (thread_p, tdes, class_oid, pk);
+
+  if (tdes != NULL)
+    {
+      /* TEST ONLY (writeset perf): per-key pack+hash time, reported once per commit at probe */
+      tdes->ws_stat_collect_ns += log_writeset_clock_ns () - perf_t0;
+    }
+  return error;
+}
+
+/*
+ * log_writeset_add_ref_dbvalue - add a foreign-key reference hash to the transaction
+ *
+ *   tdes(in/out): transaction descriptor
+ *   ref_class_oid(in): class OID of the referenced (parent) table
+ *   fk_value(in): the child row's foreign-key value
+ *   parent_pk_domain(in): domain of the parent primary-key b-tree
+ *
+ * return: NO_ERROR, or an error code on failure
+ *
+ * Note: The parent row published a WRITE hash over (its class OID, its primary key packed in
+ *       its own domain). To make this reference collide with that hash, the child value must be
+ *       packed identically: or_pack_mem_value derives the packed domain from the value itself,
+ *       so the child value is first cast into the parent primary-key domain. The resulting hash
+ *       is stored as a REF - it gates this transaction behind the parent's commit but is never
+ *       published, so children of the same parent stay independent of one another.
+ *
+ *       Composite (multi-column) parent keys are not matched yet: their packed midxkey byte
+ *       equivalence across parent and child is not proven, so they are skipped and ordering
+ *       falls back to the conservative existing path. NULL foreign keys are skipped, matching
+ *       the master's own foreign-key check.
+ */
+static int
+log_writeset_add_ref_dbvalue_internal (THREAD_ENTRY * thread_p, LOG_TDES * tdes, const OID * ref_class_oid,
+				       DB_VALUE * fk_value, struct tp_domain *parent_pk_domain)
+{
+  DB_VALUE casted;
+  char *buf = NULL;
+  char *ptr;
+  int buf_len;
+  int packed_len = 0;
+  int error;
+  TP_DOMAIN_STATUS cast_status;
+
+#if !defined (NDEBUG)
+  /* Verify once that a child value cast into the parent primary-key domain packs to the same bytes
+   * as the parent's own key - the invariant the REF hash relies on. It uses parameterized domains
+   * (tp_domain_resolve) and tp_value_cast, so it must run only after the type system is up. The
+   * first foreign-key reference is collected during ordinary DML on a fully booted server, which is
+   * always past tp_init in every mode, whereas the history init runs before tp_init on the recreate
+   * boot path. Debug builds only. */
+  {
+    static pthread_once_t selfcheck_once = PTHREAD_ONCE_INIT;
+    pthread_once (&selfcheck_once, log_writeset_selfcheck_packing);
+  }
+#endif /* !NDEBUG */
+
+  if (tdes == NULL || ref_class_oid == NULL || fk_value == NULL || parent_pk_domain == NULL)
+    {
+      return NO_ERROR;
+    }
+
+  if (tdes->ws_overflow)
+    {
+      return NO_ERROR;
+    }
+
+  if (DB_IS_NULL (fk_value))
+    {
+      return NO_ERROR;
+    }
+
+  /* multi-column parent key: packed midxkey equivalence not yet proven, skip */
+  if (TP_DOMAIN_TYPE (parent_pk_domain) == DB_TYPE_MIDXKEY)
+    {
+      return NO_ERROR;
+    }
+
+  db_make_null (&casted);
+
+  cast_status = tp_value_cast (fk_value, &casted, parent_pk_domain, false);
+  if (cast_status != DOMAIN_COMPATIBLE)
+    {
+      /* cannot reproduce the parent's packed bytes: skip so the existing ordering path stays
+       * conservative rather than emitting a hash that would never match the parent */
+      pr_clear_value (&casted);
+      return NO_ERROR;
+    }
+
+  if (DB_IS_NULL (&casted))
+    {
+      pr_clear_value (&casted);
+      return NO_ERROR;
+    }
+
+  {
+    UINT64 shash;
+    if (log_writeset_string_hash (ref_class_oid, &casted, &shash))
+      {
+	pr_clear_value (&casted);
+	return log_writeset_push_hash (thread_p, tdes, ref_class_oid, shash, LOG_WRITESET_KIND_REF);
+      }
+  }
+
+  buf_len = OR_VALUE_ALIGNED_SIZE (&casted);
+  if (buf_len <= 0)
+    {
+      pr_clear_value (&casted);
+      return NO_ERROR;
+    }
+
+  buf = (char *) malloc ((size_t) buf_len);
+  if (buf == NULL)
+    {
+      pr_clear_value (&casted);
+      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_OUT_OF_VIRTUAL_MEMORY, 1, (size_t) buf_len);
+      return ER_OUT_OF_VIRTUAL_MEMORY;
+    }
+
+  /* zero the alignment padding for a stable hash, same reason as the WRITE path */
+  memset (buf, 0, (size_t) buf_len);
+
+  ptr = or_pack_mem_value (buf, &casted, &packed_len);
+  if (ptr == NULL)
+    {
+      free_and_init (buf);
+      pr_clear_value (&casted);
+      return NO_ERROR;
+    }
+
+  error = log_writeset_push (thread_p, tdes, ref_class_oid, buf, packed_len, LOG_WRITESET_KIND_REF);
+
+  free_and_init (buf);
+  pr_clear_value (&casted);
+
+  return error;
+}
+
+int
+log_writeset_add_ref_dbvalue (THREAD_ENTRY * thread_p, LOG_TDES * tdes, const OID * ref_class_oid,
+			      DB_VALUE * fk_value, struct tp_domain *parent_pk_domain)
+{
+  UINT64 perf_t0 = log_writeset_clock_ns ();
+  int error = log_writeset_add_ref_dbvalue_internal (thread_p, tdes, ref_class_oid, fk_value, parent_pk_domain);
+
+  if (tdes != NULL)
+    {
+      /* TEST ONLY (writeset perf): per-key cast+pack+hash time, reported once per commit at probe */
+      tdes->ws_stat_collect_ns += log_writeset_clock_ns () - perf_t0;
+    }
+  return error;
+}
+
 /*
  * log_writeset_commit_probe - compute this transaction's dependency label
  *
@@ -252,6 +550,14 @@ void
 log_writeset_commit_probe (THREAD_ENTRY * thread_p, LOG_TDES * tdes, LOG_LSA * ws_parent_out)
 {
   LOG_LSA ws_parent;
+  bool ws_parent_is_read = false;
+  UINT64 perf_t0 = log_writeset_clock_ns ();	/* TEST ONLY (writeset perf): includes latch wait */
+  size_t perf_wkeys = 0, perf_rkeys = 0, perf_hits = 0;
+
+  if (tdes != NULL)
+    {
+      tdes->ws_dependency_is_read = false;
+    }
 
   pthread_mutex_lock (&log_Writeset_history.latch);
 
@@ -261,7 +567,7 @@ log_writeset_commit_probe (THREAD_ENTRY * thread_p, LOG_TDES * tdes, LOG_LSA * w
       LSA_COPY (ws_parent_out, &log_Writeset_prev_commit_lsa);
       /* TEST ONLY (writeset PoC 검증): overflow 트랜잭션은 commit-order 로 격하됨. dependency_seq 가
        * 직전 커밋을 그대로 가리키면 이 경로다(= 직렬화 배리어). 검증 후 제거. */
-      er_log_debug (ARG_FILE_LINE,
+      WS_PERF_LOG (ARG_FILE_LINE,
 		    "writeset probe trid=%d OVERFLOW->commit_order dependency_seq=%lld|%d (prev_commit=%lld|%d)\n",
 		    (tdes != NULL ? tdes->trid : -1), (long long) ws_parent_out->pageid, (int) ws_parent_out->offset,
 		    (long long) log_Writeset_prev_commit_lsa.pageid, (int) log_Writeset_prev_commit_lsa.offset);
@@ -273,19 +579,61 @@ log_writeset_commit_probe (THREAD_ENTRY * thread_p, LOG_TDES * tdes, LOG_LSA * w
 
   if (tdes != NULL)
     {
-      for (LOG_WRITESET_HASH h : tdes->ws_hashes)
+      /* Both WRITE and REF keys probe the history: a REF makes this transaction wait behind the
+       * parent row's commit exactly as a WRITE would wait behind the previous writer of the key. */
+      for (const LOG_WRITESET_ENTRY & e : tdes->ws_hashes)
 	{
-	  auto it = log_Writeset_history.map.find (h);
+	  auto it = log_Writeset_history.map.find (e.hash);
 
-	  if (it != log_Writeset_history.map.end () && LSA_GT (&it->second, &ws_parent))
+	  /* TEST ONLY (writeset perf): key-kind and map-hit counters */
+	  if (e.kind == LOG_WRITESET_KIND_WRITE)
 	    {
-	      LSA_COPY (&ws_parent, &it->second);
+	      perf_wkeys++;
+	    }
+	  else
+	    {
+	      perf_rkeys++;
+	    }
+
+	  if (it != log_Writeset_history.map.end ())
+	    {
+	      const LOG_LSA *cand = &it->second.write_seq;
+	      bool cand_is_read = false;
+
+	      perf_hits++;
+
+	      /* A write must also wait behind the newest reference to its key (the reverse-order
+	       * blind spot: children standing on the row it is about to change). A reference
+	       * consults only the write slot, so siblings referencing the same parent stay
+	       * parallel. On a tie the write slot wins: waiting for that one transaction exactly
+	       * is already sufficient. */
+	      if (e.kind == LOG_WRITESET_KIND_WRITE && LSA_GT (&it->second.read_seq, cand))
+		{
+		  cand = &it->second.read_seq;
+		  cand_is_read = true;
+		}
+
+	      if (!LSA_ISNULL (cand) && LSA_GT (cand, &ws_parent))
+		{
+		  LSA_COPY (&ws_parent, cand);
+		  ws_parent_is_read = cand_is_read;
+		}
 	    }
 	}
     }
 
+  if (ws_parent_is_read)
+    {
+      /* A read-origin dependency names only the NEWEST referencer; earlier referencers may still
+       * be running on the slave, so the label tells the gate to wait for the gap-free frontier
+       * (everything up to it applied) instead of that one transaction's completion. The value is
+       * an upper bound over every referencer of the key, so no clamping against the commit-order
+       * baseline: the frontier wait is already the stronger condition. */
+      LSA_COPY (ws_parent_out, &ws_parent);
+      tdes->ws_dependency_is_read = true;
+    }
   /* dependency_seq = min (prev_commit_lsa, ws_parent); NULL acts as the smallest LSA */
-  if (LSA_ISNULL (&log_Writeset_prev_commit_lsa) || LSA_LT (&ws_parent, &log_Writeset_prev_commit_lsa))
+  else if (LSA_ISNULL (&log_Writeset_prev_commit_lsa) || LSA_LT (&ws_parent, &log_Writeset_prev_commit_lsa))
     {
       LSA_COPY (ws_parent_out, &ws_parent);
     }
@@ -297,13 +645,17 @@ log_writeset_commit_probe (THREAD_ENTRY * thread_p, LOG_TDES * tdes, LOG_LSA * w
   /* TEST ONLY (writeset PoC 검증): 이 트랜잭션의 최종 의존 라벨을 남긴다. release 에서도 er_log_debug=yes
    * 면 보인다. dependency_seq 가 NULL 이면 독립(병렬 가능), 직전 커밋을 가리키면 사실상 직렬.
    * ws_keys 는 이 트랜잭션이 건드린 행 수(중복 포함), history_start 는 현재 floor. 검증 후 제거. */
-  er_log_debug (ARG_FILE_LINE,
+  WS_PERF_LOG (ARG_FILE_LINE,
 		"writeset probe trid=%d ws_keys=%zu dependency_seq=%lld|%d (ws_parent=%lld|%d prev_commit=%lld|%d "
-		"history_start=%lld|%d)\n", (tdes != NULL ? tdes->trid : -1),
+		"history_start=%lld|%d) wkeys=%zu rkeys=%zu hits=%zu read_dep=%d map_size=%zu probe_us=%llu collect_ns=%llu\n",
+		(tdes != NULL ? tdes->trid : -1),
 		(tdes != NULL ? tdes->ws_hashes.size () : (size_t) 0), (long long) ws_parent_out->pageid,
 		(int) ws_parent_out->offset, (long long) ws_parent.pageid, (int) ws_parent.offset,
 		(long long) log_Writeset_prev_commit_lsa.pageid, (int) log_Writeset_prev_commit_lsa.offset,
-		(long long) log_Writeset_history.history_start.pageid, (int) log_Writeset_history.history_start.offset);
+		(long long) log_Writeset_history.history_start.pageid, (int) log_Writeset_history.history_start.offset,
+		perf_wkeys, perf_rkeys, perf_hits, (int) ws_parent_is_read, log_Writeset_history.map.size (),
+		(unsigned long long) ((log_writeset_clock_ns () - perf_t0) / 1000),
+		(unsigned long long) (tdes != NULL ? tdes->ws_stat_collect_ns : 0));
 
   pthread_mutex_unlock (&log_Writeset_history.latch);
 }
@@ -326,6 +678,9 @@ log_writeset_commit_flush (THREAD_ENTRY * thread_p, LOG_TDES * tdes, const LOG_L
       return;
     }
 
+  UINT64 perf_t0 = log_writeset_clock_ns ();	/* TEST ONLY (writeset perf): includes latch wait */
+  size_t perf_published_w = 0, perf_published_r = 0;
+
   pthread_mutex_lock (&log_Writeset_history.latch);
 
   /* advance the commit-order baseline monotonically (flush order may differ from
@@ -337,24 +692,55 @@ log_writeset_commit_flush (THREAD_ENTRY * thread_p, LOG_TDES * tdes, const LOG_L
 
   if (!tdes->ws_overflow && !tdes->ws_hashes.empty ())
     {
+      /* WRITE keys own the write slot of their entry. REF keys stamp the read slot, so a later
+       * writer of the key (the parent row a child stood on) sees and waits behind its newest
+       * referencer. The slot split is what keeps siblings parallel: references consult only the
+       * write slot at probe, so a reference stamp never chains one sibling behind another. The
+       * capacity test counts every key about to be published (a referenced-only parent key also
+       * creates an entry). */
+      size_t publish_count = tdes->ws_hashes.size ();
+
       /* CAP 초과하면 히스토리를 통째로 비우고 보수적 floor 를 이 commit LSA 로 올린다
        * (= MySQL m_writeset_history.clear() + m_writeset_history_start = seq). */
-      if (log_Writeset_history.map.size () + tdes->ws_hashes.size () > (size_t) LOG_WRITESET_HISTORY_CAP)
+      if (log_Writeset_history.map.size () + publish_count > (size_t) LOG_WRITESET_HISTORY_CAP)
 	{
 	  /* TEST ONLY (writeset PoC 검증): 히스토리가 가득 차서 통째로 비우는 경로. 부팅 초기화
 	   * ("INIT (server boot)")와 구분되는 태그. 검증 후 제거. */
 	  er_log_debug (ARG_FILE_LINE,
 			"writeset history CLEAR (full): prev_count=%zu + tx=%zu > cap=%d, new history_start=%lld|%d\n",
-			log_Writeset_history.map.size (), tdes->ws_hashes.size (), LOG_WRITESET_HISTORY_CAP,
+			log_Writeset_history.map.size (), publish_count, LOG_WRITESET_HISTORY_CAP,
 			(long long) commit_lsa->pageid, (int) commit_lsa->offset);
 	  log_Writeset_history.map.clear ();
 	  LSA_COPY (&log_Writeset_history.history_start, commit_lsa);
 	}
 
-      /* 이 트랜잭션의 키들에 현재 commit LSA 를 기록(신규 삽입 또는 갱신). */
-      for (LOG_WRITESET_HASH h : tdes->ws_hashes)
+      for (const LOG_WRITESET_ENTRY & e : tdes->ws_hashes)
 	{
-	  log_Writeset_history.map[h] = *commit_lsa;
+	  auto it = log_Writeset_history.map.find (e.hash);
+
+	  if (it == log_Writeset_history.map.end ())
+	    {
+	      LOG_WRITESET_SLOTS slots;
+
+	      LSA_SET_NULL (&slots.write_seq);
+	      LSA_SET_NULL (&slots.read_seq);
+	      it = log_Writeset_history.map.emplace (e.hash, slots).first;
+	    }
+
+	  if (e.kind == LOG_WRITESET_KIND_WRITE)
+	    {
+	      LSA_COPY (&it->second.write_seq, commit_lsa);
+	      perf_published_w++;
+	    }
+	  else
+	    {
+	      /* the read slot keeps the newest referencer only and moves forward monotonically */
+	      if (LSA_GT (commit_lsa, &it->second.read_seq))
+		{
+		  LSA_COPY (&it->second.read_seq, commit_lsa);
+		}
+	      perf_published_r++;
+	    }
 	}
     }
   else if (tdes->ws_overflow)
@@ -378,7 +764,195 @@ log_writeset_commit_flush (THREAD_ENTRY * thread_p, LOG_TDES * tdes, const LOG_L
 		    (int) log_Writeset_history.history_start.offset);
     }
 
+  /* TEST ONLY (writeset perf): per-commit publish cost and history size */
+  WS_PERF_LOG (ARG_FILE_LINE, "writeset flush trid=%d flush_us=%llu published_w=%zu published_r=%zu map_size=%zu\n",
+		tdes->trid, (unsigned long long) ((log_writeset_clock_ns () - perf_t0) / 1000), perf_published_w,
+		perf_published_r, log_Writeset_history.map.size ());
+
   pthread_mutex_unlock (&log_Writeset_history.latch);
 }
+
+#if !defined (NDEBUG)
+/*
+ * log_writeset_selfcheck_pack - pack a DB_VALUE exactly as the writeset hash input is built
+ *
+ * return: malloc'd buffer with alignment padding zeroed (caller frees), or NULL on failure
+ */
+static char *
+log_writeset_selfcheck_pack (DB_VALUE * v, int *packed_len)
+{
+  char *buf;
+  char *ptr;
+  int buf_len;
+
+  *packed_len = 0;
+
+  buf_len = OR_VALUE_ALIGNED_SIZE (v);
+  if (buf_len <= 0)
+    {
+      return NULL;
+    }
+
+  buf = (char *) malloc ((size_t) buf_len);
+  if (buf == NULL)
+    {
+      return NULL;
+    }
+
+  memset (buf, 0, (size_t) buf_len);
+
+  ptr = or_pack_mem_value (buf, v, packed_len);
+  if (ptr == NULL)
+    {
+      free_and_init (buf);
+      return NULL;
+    }
+
+  return buf;
+}
+
+/*
+ * log_writeset_selfcheck_case - verify one parent/child domain pair
+ *
+ * Confirms that a child value cast into the parent primary-key domain packs to the same bytes as
+ * the parent's own primary-key value. This is the invariant the foreign-key REF hash depends on:
+ * the parent publishes a hash over its key packed in its own domain, and the child reproduces it
+ * by casting its foreign-key value into that domain first. When the two domains differ only in
+ * precision/scale/collation (a valid foreign key does not force those to match), the cast is what
+ * makes the bytes line up.
+ */
+static void
+log_writeset_selfcheck_case (const char *name, TP_DOMAIN * parent_dom, TP_DOMAIN * child_dom, DB_VALUE * source)
+{
+  DB_VALUE parent_val, child_val, ref_val;
+  char *parent_buf = NULL;
+  char *ref_buf = NULL;
+  char *child_buf = NULL;
+  int parent_len = 0;
+  int ref_len = 0;
+  int child_len = 0;
+  bool ok = false;
+  bool cast_was_needed = false;
+
+  db_make_null (&parent_val);
+  db_make_null (&child_val);
+  db_make_null (&ref_val);
+
+  if (parent_dom == NULL || child_dom == NULL)
+    {
+      er_log_debug (ARG_FILE_LINE, "writeset SELFCHECK[%s]: SKIP (domain unavailable)\n", name);
+      return;
+    }
+
+  /* parent stores its primary key in the parent domain; the child stores the same logical value
+   * in its (possibly wider) foreign-key domain */
+  if (tp_value_cast (source, &parent_val, parent_dom, false) != DOMAIN_COMPATIBLE
+      || tp_value_cast (source, &child_val, child_dom, false) != DOMAIN_COMPATIBLE)
+    {
+      er_log_debug (ARG_FILE_LINE, "writeset SELFCHECK[%s]: SKIP (source cast failed)\n", name);
+      goto cleanup;
+    }
+
+  /* the collection path casts the child value into the parent domain before packing */
+  if (tp_value_cast (&child_val, &ref_val, parent_dom, false) != DOMAIN_COMPATIBLE)
+    {
+      er_log_debug (ARG_FILE_LINE, "writeset SELFCHECK[%s]: SKIP (ref cast failed)\n", name);
+      goto cleanup;
+    }
+
+  parent_buf = log_writeset_selfcheck_pack (&parent_val, &parent_len);
+  ref_buf = log_writeset_selfcheck_pack (&ref_val, &ref_len);
+  child_buf = log_writeset_selfcheck_pack (&child_val, &child_len);
+  if (parent_buf == NULL || ref_buf == NULL || child_buf == NULL)
+    {
+      er_log_debug (ARG_FILE_LINE, "writeset SELFCHECK[%s]: SKIP (pack failed)\n", name);
+      goto cleanup;
+    }
+
+  ok = (parent_len == ref_len && memcmp (parent_buf, ref_buf, (size_t) parent_len) == 0);
+
+  /* whether the raw child bytes already differed from the parent (so the cast was load-bearing) */
+  cast_was_needed = !(child_len == parent_len && memcmp (child_buf, parent_buf, (size_t) parent_len) == 0);
+
+  er_log_debug (ARG_FILE_LINE, "writeset SELFCHECK[%s]: %s (parent_len=%d ref_len=%d cast_was_needed=%s)\n",
+		name, (ok ? "PASS" : "FAIL"), parent_len, ref_len, (cast_was_needed ? "yes" : "no"));
+  assert (ok);
+
+cleanup:
+  if (parent_buf != NULL)
+    {
+      free_and_init (parent_buf);
+    }
+  if (ref_buf != NULL)
+    {
+      free_and_init (ref_buf);
+    }
+  if (child_buf != NULL)
+    {
+      free_and_init (child_buf);
+    }
+  pr_clear_value (&parent_val);
+  pr_clear_value (&child_val);
+  pr_clear_value (&ref_val);
+}
+
+/*
+ * log_writeset_selfcheck_packing - boot-time verification of FK reference packing equivalence
+ *
+ * Covers fixed built-in types (where parent and child share the domain and the cast is a no-op)
+ * and the string/numeric cases where a child column may legally differ in precision/scale from the
+ * parent primary key, so the cast into the parent domain is what makes the packed bytes match.
+ */
+static void
+log_writeset_selfcheck_packing (void)
+{
+  TP_DOMAIN *d_int;
+  TP_DOMAIN *d_bigint;
+  TP_DOMAIN *d_date;
+  TP_DOMAIN *d_char_def;
+  TP_DOMAIN *d_char10;
+  TP_DOMAIN *d_char20;
+  TP_DOMAIN *d_num_10_2;
+  TP_DOMAIN *d_num_15_4;
+  int char_coll;
+  DB_VALUE src;
+
+  d_int = tp_domain_resolve_default (DB_TYPE_INTEGER);
+  d_bigint = tp_domain_resolve_default (DB_TYPE_BIGINT);
+  d_date = tp_domain_resolve_default (DB_TYPE_DATE);
+
+  d_char_def = tp_domain_resolve_default (DB_TYPE_CHAR);
+  char_coll = (d_char_def != NULL ? d_char_def->collation_id : 0);
+  d_char10 = tp_domain_resolve (DB_TYPE_CHAR, NULL, 10, 0, NULL, char_coll);
+  d_char20 = tp_domain_resolve (DB_TYPE_CHAR, NULL, 20, 0, NULL, char_coll);
+
+  d_num_10_2 = tp_domain_resolve (DB_TYPE_NUMERIC, NULL, 10, 2, NULL, 0);
+  d_num_15_4 = tp_domain_resolve (DB_TYPE_NUMERIC, NULL, 15, 4, NULL, 0);
+
+  /* INT / BIGINT / DATE: parent and child share the built-in domain, cast is a no-op */
+  db_make_int (&src, 42);
+  log_writeset_selfcheck_case ("INT", d_int, d_int, &src);
+  pr_clear_value (&src);
+
+  db_make_bigint (&src, (DB_BIGINT) 1234567890123LL);
+  log_writeset_selfcheck_case ("BIGINT", d_bigint, d_bigint, &src);
+  pr_clear_value (&src);
+
+  db_make_date (&src, 12, 25, 2024);
+  log_writeset_selfcheck_case ("DATE", d_date, d_date, &src);
+  pr_clear_value (&src);
+
+  /* CHAR: identical precision, then a wider child that must be refit to the parent width */
+  db_make_string (&src, "abc");
+  log_writeset_selfcheck_case ("CHAR_SAME_PREC", d_char10, d_char10, &src);
+  log_writeset_selfcheck_case ("CHAR_DIFF_PREC", d_char10, d_char20, &src);
+  pr_clear_value (&src);
+
+  /* NUMERIC: child carries a different precision/scale than the parent primary key */
+  db_make_string (&src, "123.45");
+  log_writeset_selfcheck_case ("NUMERIC", d_num_10_2, d_num_15_4, &src);
+  pr_clear_value (&src);
+}
+#endif /* !NDEBUG */
 
 #endif /* SERVER_MODE || SA_MODE */

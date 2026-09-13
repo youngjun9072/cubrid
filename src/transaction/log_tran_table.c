@@ -1617,6 +1617,8 @@ logtb_clear_tdes (THREAD_ENTRY * thread_p, LOG_TDES * tdes)
   tdes->ws_hashes.clear ();
   tdes->ws_overflow = false;
   LSA_SET_NULL (&tdes->ws_dependency_seq);
+  tdes->ws_dependency_is_read = false;
+  tdes->ws_stat_collect_ns = 0;
   tdes->m_log_postpone_cache.reset ();
   tdes->has_supplemental_log = false;
   if (tdes->ddl_sql_user_text != NULL)
@@ -1702,6 +1704,8 @@ logtb_initialize_tdes (LOG_TDES * tdes, int tran_index)
   tdes->ws_hashes.clear ();
   tdes->ws_overflow = false;
   LSA_SET_NULL (&tdes->ws_dependency_seq);
+  tdes->ws_dependency_is_read = false;
+  tdes->ws_stat_collect_ns = 0;
   tdes->lob_locator_root.init ();
   tdes->query_timeout = 0;
   tdes->query_start_time = 0;

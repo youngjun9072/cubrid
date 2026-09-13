@@ -258,6 +258,9 @@ typedef struct log_rec_ws_label LOG_REC_WS_LABEL;
 struct log_rec_ws_label
 {
   LOG_LSA dependency_seq;	/* min (prev commit LSA, writeset parent) computed at commit time */
+  bool dependency_is_read;	/* dependency came from a key's read slot (newest referencer): the applier
+				 * gate must wait for the gap-free frontier to reach dependency_seq, not for
+				 * that one transaction's completion (siblings may still be running) */
 };
 
 /* Information of database external redo log records */

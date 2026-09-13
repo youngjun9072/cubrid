@@ -530,6 +530,15 @@ repl_log_insert_statement (THREAD_ENTRY * thread_p, REPL_INFO_SBR * repl_info)
       return NO_ERROR;
     }
 
+  /* Statement replication (DDL etc.) has no row image, so its effect cannot be
+   * expressed as writeset hashes and later transactions cannot detect a conflict
+   * against it by hash matching either (e.g. the first INSERT into a table that
+   * this statement creates finds nothing to match). Demote the transaction to
+   * commit order: probing makes it wait for everything before it, and flushing
+   * clears the history and raises the floor so that every later transaction
+   * waits for this one. */
+  tdes->ws_overflow = true;
+
   /* check the replication log array status, if we need to alloc? */
   if (REPL_LOG_IS_NOT_EXISTS (tran_index)
       && ((error = repl_log_info_alloc (tdes, REPL_LOG_INFO_ALLOC_SIZE, false)) != NO_ERROR))

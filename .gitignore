@@ -162,3 +162,6 @@ build_x86_64_profile/
 
 # Built Visual Studio Code Extensions
 *.vsix
+
+# Annotation (auto-generated)
+.annotation/

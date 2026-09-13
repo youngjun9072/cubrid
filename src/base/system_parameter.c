@@ -429,6 +429,11 @@ static const char sysprm_ha_conf_file_name[] = "cubrid_ha.conf";
 
 #define PRM_NAME_HA_APPLYLOGDB_MAX_COMMIT_INTERVAL "ha_applylogdb_max_commit_interval"
 
+
+#define PRM_NAME_HA_APPLYLOGDB_DRAIN "ha_applylogdb_drain"
+
+#define PRM_NAME_HA_APPLYLOGDB_DRAIN_TIMEOUT_MSEC "ha_applylogdb_drain_timeout_msec"
+
 #define PRM_NAME_HA_CHECK_DISK_FAILURE_INTERVAL_IN_SECS "ha_check_disk_failure_interval"
 
 #define PRM_NAME_JAVA_STORED_PROCEDURE "java_stored_procedure"
@@ -5422,6 +5427,28 @@ SYSPRM_PARAM prm_Def[] = {
    {false, {.i = 40}},
    {false, {.i = 128}},
    {false, {.i = 10}},
+   (char *) NULL,
+   (DUP_PRM_FUNC) NULL,
+   (DUP_PRM_FUNC) NULL},
+  {PRM_ID_HA_APPLYLOGDB_DRAIN,
+   PRM_NAME_HA_APPLYLOGDB_DRAIN,
+   (PRM_FOR_CLIENT | PRM_FOR_HA | PRM_HIDDEN),
+   PRM_BOOLEAN,
+   PRM_CLEAR_DYNAMIC_FLAG,
+   {false, {.b = false}},
+   {false, {.b = false}},
+   NULL_SYSPRM_PARAM_VALUE, NULL_SYSPRM_PARAM_VALUE,
+   (char *) NULL,
+   (DUP_PRM_FUNC) NULL,
+   (DUP_PRM_FUNC) NULL},
+  {PRM_ID_HA_APPLYLOGDB_DRAIN_TIMEOUT_MSEC,
+   PRM_NAME_HA_APPLYLOGDB_DRAIN_TIMEOUT_MSEC,
+   (PRM_FOR_CLIENT | PRM_FOR_HA | PRM_HIDDEN),
+   PRM_INTEGER,
+   PRM_CLEAR_DYNAMIC_FLAG,
+   {false, {.i = 30000}},
+   {false, {.i = 30000}},
+   NULL_SYSPRM_PARAM_VALUE, NULL_SYSPRM_PARAM_VALUE,
    (char *) NULL,
    (DUP_PRM_FUNC) NULL,
    (DUP_PRM_FUNC) NULL}

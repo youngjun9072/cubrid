@@ -4734,6 +4734,7 @@ log_append_ws_label_with_lock (THREAD_ENTRY * thread_p, LOG_TDES * tdes)
 
   ws_label = (LOG_REC_WS_LABEL *) node->data_header;
   LSA_COPY (&ws_label->dependency_seq, &tdes->ws_dependency_seq);
+  ws_label->dependency_is_read = tdes->ws_dependency_is_read;
 
   (void) prior_lsa_next_record_with_lock (thread_p, node, tdes);
 }
@@ -5233,6 +5234,12 @@ log_cleanup_modified_class_list (THREAD_ENTRY * thread_p, LOG_TDES * tdes, LOG_L
 TRAN_STATE
 log_commit_local (THREAD_ENTRY * thread_p, LOG_TDES * tdes, bool retain_lock, bool is_local_tran)
 {
+#if defined(SERVER_MODE) || defined(SA_MODE)
+  /* TEST ONLY (writeset perf): whole local-commit duration; the denominator for the writeset
+   * overhead ratio (collect/probe/flush components are logged separately in log_writeset.c) */
+  UINT64 perf_commit_t0 = log_writeset_clock_ns ();
+#endif
+
   qmgr_clear_trans_wakeup (thread_p, tdes->tran_index, false, false);
 
   /* tx_lob_locator_clear and logtb_complete_mvcc operations must be done before entering unactive state because
@@ -5343,6 +5350,14 @@ log_commit_local (THREAD_ENTRY * thread_p, LOG_TDES * tdes, bool retain_lock, bo
 
       tdes->state = TRAN_UNACTIVE_COMMITTED;
     }
+
+#if defined(SERVER_MODE) || defined(SA_MODE)
+  /* TEST ONLY (writeset perf). _er_log_debug bypasses the er_log_debug parameter so the
+   * measurement prints in release builds without enabling every verbose debug log (same
+   * convention as LA_BENCH_TIMING_LOG in log_applier.c). */
+  _er_log_debug (ARG_FILE_LINE, "writeset perf trid=%d commit_total_us=%llu\n", tdes->trid,
+		 (unsigned long long) ((log_writeset_clock_ns () - perf_commit_t0) / 1000));
+#endif
 
   return tdes->state;
 }

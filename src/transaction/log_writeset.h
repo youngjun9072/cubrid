@@ -42,7 +42,30 @@ typedef struct log_tdes LOG_TDES;
 #ifndef _LOG_WRITESET_HASH_DEFINED_
 #define _LOG_WRITESET_HASH_DEFINED_
 typedef UINT64 LOG_WRITESET_HASH;
+
+/* A collected key is either written or only referenced by this transaction.
+ * WRITE: this transaction wrote the row that owns the key (PK or UNIQUE).
+ * REF: this transaction only pointed at the key through a foreign key value.
+ * Both kinds probe the global commit history so the transaction waits behind
+ * whoever last wrote the key, but only WRITE keys are published back into the
+ * history. Publishing a reference would chain sibling children that point at the
+ * same parent behind one another for no reason. */
+typedef enum
+{
+  LOG_WRITESET_KIND_WRITE = 0,
+  LOG_WRITESET_KIND_REF = 1
+} LOG_WRITESET_KIND;
+
+typedef struct log_writeset_entry LOG_WRITESET_ENTRY;
+struct log_writeset_entry
+{
+  LOG_WRITESET_HASH hash;
+  LOG_WRITESET_KIND kind;
+};
 #endif /* _LOG_WRITESET_HASH_DEFINED_ */
+
+/* forward declaration of value domain (defined in object_domain.h) */
+struct tp_domain;
 
 /* per-transaction distinct-key limit and global history capacity.
  *
@@ -71,16 +94,36 @@ typedef UINT64 LOG_WRITESET_HASH;
  * 범용 해법 아님(운영은 워크로드 변경행수 기반 적응적 사이징 필요). MySQL 은 이 둘을 한 상수
  * (binlog_transaction_dependency_history_size)로 공유하나(add_write_set 의 per-tx 체크와
  * get_dependency 의 history 체크가 같은 값), 여기선 분리해 per-tx 만 키워 UPDATE 를 병렬화한다. */
-#define LOG_WRITESET_TX_LIMIT     250000
-#define LOG_WRITESET_HISTORY_CAP  2000000
+/* MySQL 9.x 는 두 한도를 한 변수(binlog_transaction_dependency_history_size, 기본 1000만)로
+ * 공유한다(add_write_set 의 per-tx 체크와 이력 맵 체크가 같은 값). 동등 조건 비교를 위해 두 값
+ * 모두 1000만으로 상향. 위 설명의 25만/200만은 초기 PoC 검증용 사이징이다.
+ * 유의: per-tx 1000만이면 그 크기의 커밋 하나가 probe/flush 잠금을 초 단위로 쥘 수 있다. */
+#define LOG_WRITESET_TX_LIMIT     10000000
+#define LOG_WRITESET_HISTORY_CAP  10000000
 
-/* global commit history (MySQL rpl_trx_tracking 방식): writeset 키 해시 -> 최신 커밋 LSA 표준
+/* per-key history entry, split into two slots.
+ * write_seq: the last commit that wrote the row owning this key (INSERT/DELETE/UPDATE).
+ * read_seq: the last commit that pointed at this key through a foreign-key value.
+ * A writer must wait behind both slots (the previous writer, and every child still standing on
+ * the row - the reverse-order blind spot of the single-slot design). A reference consults only
+ * write_seq, so siblings referencing the same parent never wait behind one another. read_seq
+ * keeps the newest referencer only; it is a monotonic upper bound over every referencer, which
+ * is sufficient because a read-origin dependency is gated on the gap-free frontier (all commits
+ * up to it applied), not on that single transaction. */
+typedef struct log_writeset_slots LOG_WRITESET_SLOTS;
+struct log_writeset_slots
+{
+  LOG_LSA write_seq;
+  LOG_LSA read_seq;
+};
+
+/* global commit history (MySQL rpl_trx_tracking 방식): writeset 키 해시 -> 슬롯(쓰기/참조) 표준
  * 해시맵. 손수 만든 오픈 어드레싱 대신 std::unordered_map 이 성장/적재율을 알아서 관리하고,
  * CAP 초과 시 통째로 clear + history_start 상향(= MySQL m_writeset_history.clear()). */
 typedef struct log_writeset_history LOG_WRITESET_HISTORY;
 struct log_writeset_history
 {
-  std::unordered_map < LOG_WRITESET_HASH, LOG_LSA > map;	/* 키 해시 -> 최신 커밋 LSA */
+  std::unordered_map < LOG_WRITESET_HASH, LOG_WRITESET_SLOTS > map;	/* 키 해시 -> 쓰기/참조 슬롯 */
   LOG_LSA history_start;	/* clear 로 evict 된 키의 보수적 부모 LSA */
   pthread_mutex_t latch;	/* 전체 보호 */
 };
@@ -92,7 +135,10 @@ extern void log_writeset_history_finalize (void);
 extern int log_writeset_add_key (THREAD_ENTRY * thread_p, LOG_TDES * tdes, const OID * class_oid,
 				 const char *packed, int len);
 extern int log_writeset_add_dbvalue (THREAD_ENTRY * thread_p, LOG_TDES * tdes, const OID * class_oid, DB_VALUE * pk);
+extern int log_writeset_add_ref_dbvalue (THREAD_ENTRY * thread_p, LOG_TDES * tdes, const OID * ref_class_oid,
+					 DB_VALUE * fk_value, struct tp_domain *parent_pk_domain);
 extern void log_writeset_commit_probe (THREAD_ENTRY * thread_p, LOG_TDES * tdes, LOG_LSA * ws_parent_out);
 extern void log_writeset_commit_flush (THREAD_ENTRY * thread_p, LOG_TDES * tdes, const LOG_LSA * commit_lsa);
+extern UINT64 log_writeset_clock_ns (void);
 
 #endif /* _LOG_WRITESET_H_ */

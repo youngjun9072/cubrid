@@ -115,6 +115,10 @@
 #define LA_DEBUG_LOG(...) ((void) 0)
 #endif /* !NDEBUG */
 
+/* TEST ONLY (writeset PoC benchmark): keep transaction boundary timing in release builds too.
+ * _er_log_debug bypasses PRM_ID_ER_LOG_DEBUG so the existing verbose debug logs can remain disabled. */
+#define LA_BENCH_TIMING_LOG(...) _er_log_debug (__VA_ARGS__)
+
 /* for adaptive commit interval */
 #define LA_NUM_DELAY_HISTORY                    10
 #define LA_MAX_TOLERABLE_DELAY                  2
@@ -323,6 +327,10 @@ struct la_apply_task
   /* writeset PoC: 마스터 commit_seq 기준 dependency_seq. 커밋 직전 LOG_DUMMY_WS_LABEL 에서
    * 디코드한다. 게이트가 이 값의 선행 트랜잭션 완료를 기다린다. NULL=의존 없음. */
   LOG_LSA dependency_seq;
+  /* dependency_seq 가 키의 read 슬롯(마지막 참조자)에서 나온 라벨. 참조자들은 병렬이라 그
+   * 하나의 완료가 앞선 참조자들의 완료를 보장하지 않으므로, 게이트는 완료집합 멤버십 대신
+   * 프론티어(그 LSA 이하 전부 적용 완료)로만 통과시킨다. */
+  bool dependency_is_read;
 };
 
 typedef struct la_apply_stats LA_APPLY_STATS;
@@ -499,6 +507,8 @@ struct la_info
   bool is_end_of_record;
   int last_server_state;
   bool is_role_changed;
+  UINT64 ws_label_missing_count;	/* writeset PoC drain: commits seen without a preceding LOG_DUMMY_WS_LABEL
+					 * for the same trid (see la_log_record_process LOG_COMMIT handling) */
 
   /* _db_ha_apply_info */
   LOG_LSA append_lsa;		/* append lsa of active log header */
@@ -616,6 +626,36 @@ static LA_DISPATCH_ORDER la_Dispatch_order;
 /* 리더가 부여하는 단조 증가 시퀀스.
  * 워커 결과를 out-of-order 로 회수하더라도 retire 는 이 순서대로만 수행한다. */
 static UINT64 la_dispatch_sequence = 0;
+
+/* writeset PoC drain: la_clock_ns of when the reader first noticed the drain wait for the current
+ * role change (0 = not currently waiting). Reset to 0 alongside every la_Info.is_role_changed = false
+ * (la_lock_dbname, la_unlock_dbname, la_init), so it always starts fresh for the next role change. */
+static UINT64 la_Drain_wait_start_ns = 0;
+
+/*
+ * la_clock_ns() - monotonic wall clock in nanoseconds
+ *
+ * Note: local to the client-side applier so the drain/backstop timing
+ *       does not pull the server-only writeset perf clock into this library.
+ */
+static UINT64
+la_clock_ns (void)
+{
+  struct timespec ts;
+
+  clock_gettime (CLOCK_MONOTONIC, &ts);
+  return (UINT64) ts.tv_sec * 1000000000ULL + (UINT64) ts.tv_nsec;
+}
+
+#define LA_TIME_BEGIN(tv) gettimeofday (&(tv), NULL)
+#define LA_TIME_ACCUM_USEC(tv_begin, total_var) \
+  do { \
+    struct timeval _tv_end; \
+    gettimeofday (&_tv_end, NULL); \
+    (total_var) += (UINT64) (((INT64) _tv_end.tv_sec - (INT64) (tv_begin).tv_sec) * 1000000LL \
+                             + ((INT64) _tv_end.tv_usec - (INT64) (tv_begin).tv_usec)); \
+  } while (0)
+
 #if !defined (NDEBUG)
 typedef struct la_parallel_apply_window_stats LA_PARALLEL_APPLY_WINDOW_STATS;
 struct la_parallel_apply_window_stats
@@ -629,15 +669,6 @@ struct la_parallel_apply_window_stats
 };
 
 static LA_PARALLEL_APPLY_WINDOW_STATS la_Parallel_apply_window;
-
-#define LA_TIME_BEGIN(tv) gettimeofday (&(tv), NULL)
-#define LA_TIME_ACCUM_USEC(tv_begin, total_var) \
-  do { \
-    struct timeval _tv_end; \
-    gettimeofday (&_tv_end, NULL); \
-    (total_var) += (UINT64) (((INT64) _tv_end.tv_sec - (INT64) (tv_begin).tv_sec) * 1000000LL \
-                             + ((INT64) _tv_end.tv_usec - (INT64) (tv_begin).tv_usec)); \
-  } while (0)
 
 typedef struct la_debug_progress_stats LA_DEBUG_PROGRESS_STATS;
 struct la_debug_progress_stats
@@ -873,7 +904,8 @@ static void la_clear_all_repl_and_commit_list (void);
 static int la_set_repl_log (LOG_PAGE * log_pgptr, int log_type, int tranid, LOG_LSA * lsa);
 static int la_add_node_into_la_commit_list (int tranid, LOG_LSA * lsa, int type, time_t eot_time);
 static time_t la_retrieve_eot_time (LOG_PAGE * pgptr, LOG_LSA * lsa);
-static void la_retrieve_ws_label (LOG_PAGE * pgptr, LOG_LSA * lsa, LOG_LSA * dependency_seq);
+static void la_retrieve_ws_label (LOG_PAGE * pgptr, LOG_LSA * lsa, LOG_LSA * dependency_seq,
+				  bool * dependency_is_read);
 static int la_get_current (OR_BUF * buf, SM_CLASS * sm_class, int bound_bit_flag, DB_OTMPL * def, DB_VALUE * key,
 			   int offset_size);
 static void la_make_room_for_mvcc_insid (RECDES * recdes);
@@ -933,9 +965,12 @@ static LA_ITEM *la_get_next_repl_item (LA_ITEM * item, bool is_long_trans, LOG_L
 static LA_ITEM *la_get_next_repl_item_from_list (LA_ITEM * item);
 static LA_ITEM *la_get_next_repl_item_from_log (LA_ITEM * item, LOG_LSA * last_lsa);
 
-static int la_commit_transaction (unsigned long long applied_item_count, UINT64 *db_commit_usec,
-				  UINT64 *post_commit_cleanup_usec);
+static int la_commit_transaction (unsigned long long applied_item_count, const LOG_LSA * commit_lsa,
+				  UINT64 *db_commit_usec, UINT64 *post_commit_cleanup_usec);
 static int la_find_last_deleted_arv_num (void);
+
+static bool la_drain_enabled (void);
+static bool la_gate_drain_complete (void);
 
 static bool la_restart_on_bulk_flush_error (int errid);
 static char *la_get_hostname_from_log_path (char *log_path);
@@ -1724,7 +1759,7 @@ la_gate_mark_completed (const LOG_LSA * commit_seq)
  * ②는 최적화(빠른 경로 + prune 으로 메모리 상한), ③이 근본(홀 커버). 근거는 게이트 헤더 주석 참조.
  */
 static bool
-la_gate_is_satisfied (const LOG_LSA * dep)
+la_gate_is_satisfied (const LOG_LSA * dep, bool dep_is_read)
 {
   if (LSA_ISNULL (dep))
     {
@@ -1733,6 +1768,13 @@ la_gate_is_satisfied (const LOG_LSA * dep)
   if (la_Gate_frontier_seeded && LSA_LE (dep, &la_Gate_frontier))
     {
       return true;		/* ② LWM 이하 = 그 이하 커밋 전부 적용 완료 */
+    }
+  if (dep_is_read)
+    {
+      /* read 슬롯 유래 라벨은 "마지막 참조자"만 가리킨다. 참조자들은 병렬이라 그 하나가
+       * 완료집합에 먼저 들어와도(홀) 앞선 참조자가 실행 중일 수 있으므로, 완료집합 멤버십
+       * 으로는 통과시키지 않고 프론티어가 라벨까지 올라올 때만(②) 내보낸다. */
+      return false;
     }
   return la_gate_set_contains (dep);	/* ③ 프론티어 위 홀: 완료집합에서 직접 확인 */
 }
@@ -1779,7 +1821,7 @@ la_gate_drain_ready (void)
       progressed = false;
       while (cur != NULL)
 	{
-	  if (la_gate_is_satisfied (&cur->task.dependency_seq))
+	  if (la_gate_is_satisfied (&cur->task.dependency_seq, cur->task.dependency_is_read))
 	    {
 	      LA_GATE_PENDING *ready = cur;
 
@@ -1929,6 +1971,23 @@ la_gate_init (void)
 	LSA_SET_NULL (&la_Gate_completed_slots[i]);
       }
   }
+}
+
+/*
+ * la_gate_drain_complete() - whether the writeset dependency gate has no in-flight work left
+ *   return: true if nothing is parked, nothing is queued in the commit-order FIFO, and nothing
+ *           is waiting to be collected from a worker
+ *
+ * Note:
+ *   la_Gate_pending_head, la_Dispatch_order.count and la_Gate_order_head are only ever written by
+ *   the reader thread that also calls this, so reading them here without a lock is safe. Used by
+ *   la_change_state() to hold the DONE transition open until every transaction the reader already
+ *   let past the gate has actually finished (dispatched, applied, and collected).
+ */
+static bool
+la_gate_drain_complete (void)
+{
+  return (la_Gate_pending_head == NULL && la_Dispatch_order.count == 0 && la_Gate_order_head == NULL);
 }
 
 #if !defined (NDEBUG)
@@ -2520,12 +2579,35 @@ la_retire_ready_results (void)
       struct timeval _commit_apply_info_begin;
       LA_TIME_BEGIN (_commit_apply_info_begin);
 #endif /* !NDEBUG */
-      /* Persist _db_ha_apply_info (committed/committed_rep/required) at each
-       * transaction retire — the most accurate point, right after H-1 has fixed
-       * the frontier. la_reader_commit_apply_info() commits the transaction
-       * internally on success, so the standalone db_commit_transaction() that
-       * replaced it during bottleneck measurement is no longer needed. */
-      error = la_reader_commit_apply_info ();
+      /* Persist _db_ha_apply_info (committed/committed_rep/required) after the
+       * frontier is fixed, but NOT on every retire. In a mutual HA pair the peer
+       * node also runs an applier, and every commit this process makes on the
+       * local server is written to the local log and shipped back to the peer as
+       * an item-less commit for the peer to retire. Committing apply_info per
+       * retire therefore turns each incoming empty commit into a new outgoing
+       * commit, and the two appliers feed each other a self-sustaining stream of
+       * empty transactions (observed: millions of applied=0 commits per hour).
+       * Batch the persistence on the commit interval like the serial applier
+       * does; the periodic la_log_commit() path in the main loop flushes any
+       * advance that happens while this throttle is closed. A crash loses at
+       * most one interval of persisted progress, which only widens the restart
+       * re-apply window. */
+      {
+	static UINT64 last_apply_info_commit_ns = 0;	/* reader thread only */
+	UINT64 now_ns = la_clock_ns ();
+	UINT64 interval_ns =
+	  (UINT64) prm_get_integer_value (PRM_ID_HA_APPLYLOGDB_MAX_COMMIT_INTERVAL_IN_MSECS) * 1000000ULL;
+
+	if (now_ns - last_apply_info_commit_ns >= interval_ns)
+	  {
+	    error = la_reader_commit_apply_info ();
+	    last_apply_info_commit_ns = now_ns;
+	  }
+	else
+	  {
+	    error = NO_ERROR;
+	  }
+      }
 #if !defined (NDEBUG)
       LA_TIME_ACCUM_USEC (_commit_apply_info_begin, la_Debug_progress.reader_commit_apply_info_usec_total);
       la_Debug_progress.reader_commit_apply_info_count_total++;
@@ -3266,7 +3348,8 @@ la_apply_worker_main (void *arg)
       LA_APPLY_TASK task;
       LA_APPLY_RESULT result;
       int total_rows = 0;
-      unsigned long long applied_item_count;
+      unsigned long long applied_item_count = 0;
+      struct timeval bench_begin;
 
       if (la_dequeue_apply_task (worker, &task) != NO_ERROR)
 	{
@@ -3281,6 +3364,8 @@ la_apply_worker_main (void *arg)
       la_Debug_worker_current_stage[worker_context.worker_idx] = LA_WORKER_STAGE_APPLY;
 #endif /* !NDEBUG */
 
+      LA_TIME_BEGIN (bench_begin);
+
       memset (&result, 0, sizeof (result));
       result.seq = task.seq;
       result.tranid = task.tranid;
@@ -3288,13 +3373,14 @@ la_apply_worker_main (void *arg)
       result.commit_lsa = task.commit_lsa;
       LSA_SET_NULL (&result.committed_rep_lsa);
       result.log_record_time = task.log_record_time;
-      /* TEST ONLY (writeset PoC 검증): 워커가 이 트랜잭션 적용을 "시작"하는 시점. release 에서도
-       * er_log_debug=yes 면 남는다. 에러로그의 타임스탬프로 워커간 START/END 구간이 겹치면 병렬,
-       * 겹치지 않고 한 워커의 END 뒤에 다음 START 가 오면 직렬이다. 검증 후 제거. */
-      er_log_debug (ARG_FILE_LINE, "ws_apply START worker=%d trid=%d rectype=%d commit_lsa=%lld|%d dep=%lld|%d\n",
-		    (int) (worker - la_apply_Workers), task.tranid, task.rectype, (long long) task.commit_lsa.pageid,
-		    (int) task.commit_lsa.offset, (long long) task.dependency_seq.pageid,
-		    (int) task.dependency_seq.offset);
+      /* TEST ONLY (writeset PoC 검증): 워커가 이 트랜잭션 적용을 "시작"하는 시점.
+       * 전역 er_log_debug 설정을 우회하므로 기존 대량 debug 로그를 끈 채 START/END만 남길 수 있다.
+       * 워커간 START/END 구간이 겹치면 병렬, 한 워커의 END 뒤에 다음 START가 오면 직렬이다. */
+      LA_BENCH_TIMING_LOG (ARG_FILE_LINE,
+			   "ws_apply START worker=%d trid=%d rectype=%d commit_lsa=%lld|%d dep=%lld|%d\n",
+			   (int) (worker - la_apply_Workers), task.tranid, task.rectype,
+			   (long long) task.commit_lsa.pageid, (int) task.commit_lsa.offset,
+			   (long long) task.dependency_seq.pageid, (int) task.dependency_seq.offset);
       LA_DEBUG_LOG (ARG_FILE_LINE,
 		    "worker[tid=%lu idx=%d tran=%d] dequeued trid=%d rectype=%d apply=%p commit_lsa=%lld|%d dep=%lld|%d head=%p\n",
 		    (unsigned long) pthread_self (), (int) (worker - la_apply_Workers), tm_Tran_index, task.tranid,
@@ -3354,6 +3440,35 @@ la_apply_worker_main (void *arg)
 	  applied_item_count =
 	    result.stats.insert_counter + result.stats.update_counter + result.stats.delete_counter + result.stats.fail_counter;
 	  worker_applied_item_count += applied_item_count;
+
+	  /* Crash-injection test hook: hold a transaction just before it commits so
+	   * a chosen class can be stalled while other workers commit past it, then a
+	   * kill leaves a deterministic gap of applied-but-uncommitted work. Inert
+	   * unless CUBRID_HA_TEST_BLOCK_CLASS names the last applied class, so it is
+	   * kept in release builds (like the worker-timing counters) and gated purely
+	   * by the environment variable. The stall length comes from
+	   * CUBRID_HA_TEST_BLOCK_MSEC (default 60000 ms). */
+	  {
+	    const char *block_class = getenv ("CUBRID_HA_TEST_BLOCK_CLASS");
+
+	    if (block_class != NULL && block_class[0] != '\0' && result.stats.last_class_name[0] != '\0'
+		&& strcmp (block_class, result.stats.last_class_name) == 0)
+	      {
+		const char *block_msec_str = getenv ("CUBRID_HA_TEST_BLOCK_MSEC");
+		int block_msec = (block_msec_str != NULL) ? atoi (block_msec_str) : 60000;
+
+		if (block_msec > 0)
+		  {
+		    _er_log_debug (ARG_FILE_LINE,
+				   "ws_marker TEST block before commit worker=%d trid=%d class=%s commit_lsa=%lld|%d "
+				   "block_msec=%d\n", (int) (worker - la_apply_Workers), task.tranid,
+				   result.stats.last_class_name, (long long) task.commit_lsa.pageid,
+				   (int) task.commit_lsa.offset, block_msec);
+		    usleep ((useconds_t) block_msec * 1000);
+		  }
+	      }
+	  }
+
 #if !defined (NDEBUG)
 	  LA_TIME_BEGIN (_commit_begin);
 	  la_Debug_worker_current_stage[worker_context.worker_idx] = LA_WORKER_STAGE_COMMIT;
@@ -3365,7 +3480,9 @@ la_apply_worker_main (void *arg)
 			result.stats.last_class_name[0] != '\0' ? result.stats.last_class_name : "<none>",
 			applied_item_count, worker_applied_item_count, result.stats.insert_counter,
 			result.stats.update_counter, result.stats.delete_counter, result.stats.fail_counter);
-	  result.error = la_commit_transaction (worker_applied_item_count, &db_commit_usec, &post_commit_cleanup_usec);
+	  result.error =
+	    la_commit_transaction (worker_applied_item_count, &task.commit_lsa,
+				   &db_commit_usec, &post_commit_cleanup_usec);
 #if !defined (NDEBUG)
 	  LA_TIME_ACCUM_USEC (_commit_begin, la_Debug_progress.worker_commit_usec_total[worker_context.worker_idx]);
 	  la_Debug_progress.worker_db_commit_usec_total[worker_context.worker_idx] += db_commit_usec;
@@ -3388,12 +3505,24 @@ la_apply_worker_main (void *arg)
 			(unsigned long) pthread_self (), (int) (worker - la_apply_Workers), tm_Tran_index, task.tranid,
 			result.stats.last_class_name[0] != '\0' ? result.stats.last_class_name : "<none>",
 			result.error, worker_applied_item_count);
-	  /* TEST ONLY (writeset PoC 검증): 워커가 이 트랜잭션 적용을 "종료(커밋 완료)"한 시점.
-	   * START 와 짝지어 워커별 구간 겹침으로 직렬/병렬을 판정한다. 검증 후 제거. */
-	  er_log_debug (ARG_FILE_LINE, "ws_apply END   worker=%d trid=%d commit_lsa=%lld|%d applied=%llu err=%d\n",
-			(int) (worker - la_apply_Workers), task.tranid, (long long) task.commit_lsa.pageid,
-			(int) task.commit_lsa.offset, applied_item_count, result.error);
 	}
+
+      {
+	UINT64 bench_elapsed_usec = 0;
+
+	LA_TIME_ACCUM_USEC (bench_begin, bench_elapsed_usec);
+	/* TEST ONLY (writeset PoC 검증): 전역 er_log_debug=no 상태에서도 transaction당 START/END 두 줄만
+	 * release/debug 빌드 모두 남긴다. START는 worker dequeue 직후, END는 apply/commit 처리 종료 시점이다. */
+	LA_BENCH_TIMING_LOG (ARG_FILE_LINE,
+			     "ws_apply END   worker=%d trid=%d rectype=%d commit_lsa=%lld|%d "
+			     "class=%s elapsed_usec=%llu applied=%llu ins=%d upd=%d del=%d schema=%d fail=%d err=%d\n",
+			     (int) (worker - la_apply_Workers), task.tranid, task.rectype,
+			     (long long) task.commit_lsa.pageid, (int) task.commit_lsa.offset,
+			     result.stats.last_class_name[0] != '\0' ? result.stats.last_class_name : "<none>",
+			     (unsigned long long) bench_elapsed_usec, applied_item_count, result.stats.insert_counter,
+			     result.stats.update_counter, result.stats.delete_counter, result.stats.schema_counter,
+			     result.stats.fail_counter, result.error);
+      }
 
 #if !defined (NDEBUG)
       LA_TIME_ACCUM_USEC (_busy_begin, la_Debug_progress.worker_busy_usec_total[worker_context.worker_idx]);
@@ -5781,6 +5910,13 @@ la_find_log_pagesize (LA_ACT_LOG * act_log, const char *logpath, const char *dbn
       /* check mark will deleted */
       if (act_log->log_hdr->mark_will_del == true)
 	{
+	  /* TEST ONLY (mark_will_del 진단): 헤더를 읽자마자 mark_will_del 이 켜져 있으면 여기서 3초 쉬고
+	   * mount 실패로 되돌린다. copylogdb 가 언제 이 플래그를 남겼는지 대조할 수 있게 헤더값을 남긴다. */
+	  er_log_debug (ARG_FILE_LINE,
+			"la_fetch_log_hdr saw mark_will_del=true (db_creation=%lld db_restore_time=%lld) path=%s\n",
+			(long long) act_log->log_hdr->db_creation, (long long) act_log->log_hdr->db_restore_time,
+			act_log->path);
+
 	  LA_SLEEP (3, 0);
 
 	  er_set_with_oserror (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_LOG_MOUNT_FAIL, 1, act_log->path);
@@ -6765,7 +6901,7 @@ la_retrieve_eot_time (LOG_PAGE * pgptr, LOG_LSA * lsa)
  * Note: la_retrieve_eot_time() 과 동일한 패턴. 레코드 헤더 뒤 data_header 를 읽는다.
  */
 static void
-la_retrieve_ws_label (LOG_PAGE * pgptr, LOG_LSA * lsa, LOG_LSA * dependency_seq)
+la_retrieve_ws_label (LOG_PAGE * pgptr, LOG_LSA * lsa, LOG_LSA * dependency_seq, bool * dependency_is_read)
 {
   int error = NO_ERROR;
   LOG_REC_WS_LABEL *ws_label;
@@ -6774,6 +6910,7 @@ la_retrieve_ws_label (LOG_PAGE * pgptr, LOG_LSA * lsa, LOG_LSA * dependency_seq)
   LOG_PAGE *pg;
 
   LSA_SET_NULL (dependency_seq);
+  *dependency_is_read = false;
 
   pageid = lsa->pageid;
   offset = DB_SIZEOF (LOG_RECORD_HEADER) + lsa->offset;
@@ -6793,6 +6930,7 @@ la_retrieve_ws_label (LOG_PAGE * pgptr, LOG_LSA * lsa, LOG_LSA * dependency_seq)
 
   ws_label = (LOG_REC_WS_LABEL *) ((char *) pg->area + offset);
   LSA_COPY (dependency_seq, &ws_label->dependency_seq);
+  *dependency_is_read = ws_label->dependency_is_read;
 }
 
 /*
@@ -9020,6 +9158,21 @@ la_update_query_execute_with_values (const char *sql, int arg_count, DB_VALUE * 
 }
 
 /*
+ * la_drain_enabled() - whether the writeset PoC drain (hold DONE until the gate empties) is on
+ *   return: true if ha_applylogdb_drain is set
+ *
+ * Note:
+ *   Every drain-related branch (C1 label-missing detection, the DONE gate in la_change_state,
+ *   and the backstop timeout) is guarded by this so the default (off) keeps today's behavior:
+ *   immediate DONE on role change, no drain wait.
+ */
+static bool
+la_drain_enabled (void)
+{
+  return prm_get_bool_value (PRM_ID_HA_APPLYLOGDB_DRAIN);
+}
+
+/*
  * la_apply_schema_log() - apply the schema log to the target slave
  *   return: NO_ERROR or error code
  *   item(in): replication item
@@ -9336,19 +9489,25 @@ la_apply_repl_log (LA_APPLY_WORKER_CONTEXT * context, LA_APPLY * apply, int rect
       return NO_ERROR;
     }
 
-  if (apply->head == NULL || LSA_LE (commit_lsa, &la_Info.last_committed_lsa))
-    {
-      /* 이미 적용된 트랜잭션이거나 빈 리스트면 아이템만 비우고 종료 (슬롯 정리는 리더) */
-      if (apply->head != NULL && LSA_LE (commit_lsa, &la_Info.last_committed_lsa))
-	{
-	  /* R3: the whole transaction is skipped here (already committed before this
-	   * process started). Log per transaction only — never per item. */
-	  er_log_debug (ARG_FILE_LINE, "ws_repl skip whole txn (already committed) trid %d commit_lsa %lld|%d",
-			apply->tranid, (long long int) commit_lsa->pageid, (int) commit_lsa->offset);
-	}
-      la_free_all_repl_items (apply);
-      return NO_ERROR;
-    }
+  {
+    bool already_committed = LSA_LE (commit_lsa, &la_Info.last_committed_lsa);
+
+    if (apply->head == NULL || already_committed)
+      {
+	/* 이미 적용된 트랜잭션이거나 빈 리스트면 아이템만 비우고 종료 (슬롯 정리는 리더) */
+	if (apply->head != NULL && already_committed)
+	  {
+	    /* R3: the whole transaction is skipped here (already committed before this
+	     * process started). Log per
+	     * transaction only — never per item. */
+	    er_log_debug (ARG_FILE_LINE, "ws_repl skip whole txn (already committed) trid %d commit_lsa %lld|%d",
+			  apply->tranid,
+			  (long long int) commit_lsa->pageid, (int) commit_lsa->offset);
+	  }
+	la_free_all_repl_items (apply);
+	return NO_ERROR;
+      }
+  }
 
   assert (rectype == LOG_COMMIT);
 
@@ -9775,6 +9934,7 @@ la_log_record_process (LOG_RECORD_HEADER * lrec, LOG_LSA * final, LOG_PAGE * pg_
    * 리더(로그를 읽는 단일 스레드)만 접근하므로 락이 필요 없다. */
   static int la_ws_label_trid = NULL_TRANID;
   static LOG_LSA la_ws_label_dependency_seq = { NULL_PAGEID, NULL_OFFSET };
+  static bool la_ws_label_dependency_is_read = false;
 
 #if !defined (NDEBUG)
   /* Per-trid run length trace. Emits one line whenever the trid the reader is currently
@@ -10038,11 +10198,31 @@ la_log_record_process (LOG_RECORD_HEADER * lrec, LOG_LSA * final, LOG_PAGE * pg_
 	  if (la_ws_label_trid == lrec->trid)
 	    {
 	      LSA_COPY (&task.dependency_seq, &la_ws_label_dependency_seq);
+	      task.dependency_is_read = la_ws_label_dependency_is_read;
 	      la_ws_label_trid = NULL_TRANID;
 	    }
 	  else
 	    {
 	      LSA_SET_NULL (&task.dependency_seq);
+	      task.dependency_is_read = false;
+
+	      /* writeset PoC drain (C1): a commit with replicated items but no preceding WS_LABEL for
+	       * the same trid means this commit's dependency_seq could not be recovered, so the gate
+	       * let it through unordered. A commit with no items at all also lands in this branch
+	       * (see the comment above) and is not a label-missing case, so it must not be counted --
+	       * hence the task.apply->head check. Open item: whether the master always emits a
+	       * LOG_DUMMY_WS_LABEL ahead of every repl-bearing COMMIT is a master-side invariant this
+	       * file cannot confirm; if the master legitimately skips it in some path, this counter
+	       * will over-count. NOTIFICATION severity only -- this does not stop replication. */
+	      if (la_drain_enabled () && task.apply != NULL && task.apply->head != NULL)
+		{
+		  la_Info.ws_label_missing_count++;
+		  snprintf (buffer, sizeof (buffer),
+			    "writeset drain: commit trid=%d at %lld|%d has no preceding WS_LABEL; dependency_seq "
+			    "unknown, applied unordered (count=%llu)", lrec->trid, (long long) final->pageid,
+			    (int) final->offset, (unsigned long long) la_Info.ws_label_missing_count);
+		  er_set (ER_NOTIFICATION_SEVERITY, ARG_FILE_LINE, ER_HA_GENERIC_ERROR, 1, buffer);
+		}
 	    }
 
 	  /*프론티어는 첫 커밋 처리 직전 재시작 지점(la_Info.committed_lsa, 하위 전부 적용됨)으로
@@ -10061,7 +10241,7 @@ la_log_record_process (LOG_RECORD_HEADER * lrec, LOG_LSA * final, LOG_PAGE * pg_
 
 	  /* writeset PoC: 의존 미충족이면 워커로 안 보내고 리더 pending 큐에 park.
 	   * reader 는 막히지 않고 다음 레코드를 계속 읽는다. 선행 완료 시 collect 후 drain 에서 디스패치. */
-	  if (la_gate_is_satisfied (&task.dependency_seq))
+	  if (la_gate_is_satisfied (&task.dependency_seq, task.dependency_is_read))
 	    {
 	      /* TEST ONLY (writeset PoC 검증): 리더가 즉시 디스패치(의존 충족). park 대비 비율로
 	       * 게이트가 병렬을 흘려보내는지 직렬로 막는지 본다. 검증 후 제거. */
@@ -10145,7 +10325,7 @@ la_log_record_process (LOG_RECORD_HEADER * lrec, LOG_LSA * final, LOG_PAGE * pg_
     case LOG_DUMMY_WS_LABEL:
       /* writeset PoC: 커밋 직전 라벨 레코드. dependency_seq 를 디코드해 홀더에 저장해 두면,
        * 바로 뒤따르는 LOG_COMMIT(같은 trid)이 task.dependency_seq 로 꺼내 쓴다. */
-      la_retrieve_ws_label (pg_ptr, final, &la_ws_label_dependency_seq);
+      la_retrieve_ws_label (pg_ptr, final, &la_ws_label_dependency_seq, &la_ws_label_dependency_is_read);
       la_ws_label_trid = lrec->trid;
       LA_DEBUG_LOG (ARG_FILE_LINE, "reader ws_label trid=%d dependency_seq=%lld|%d at=%lld|%d\n", lrec->trid,
 		    (long long) la_ws_label_dependency_seq.pageid, (int) la_ws_label_dependency_seq.offset,
@@ -10271,6 +10451,17 @@ la_change_state (void)
 	case HA_SERVER_STATE_MAINTENANCE:
 	  if (la_Info.apply_state != HA_LOG_APPLIER_STATE_DONE)
 	    {
+	      /* writeset PoC drain (Hook A): with the drain on, hold DONE open while the dependency
+	       * gate still has work in flight (parked pending, dispatched-but-uncollected, or queued
+	       * in the commit-order FIFO). Setting DONE here would let the role-changed dbname-lock
+	       * release and the finalize block tear down repl_lists while workers are still applying,
+	       * corrupting slave state on a fast failback. Leaving new_state at NA keeps apply_state at
+	       * WORKING for one more pass; the backstop timeout covers a gate that never drains. */
+	      if (la_drain_enabled () && !la_gate_drain_complete ())
+		{
+		  break;
+		}
+
 	      /* notify to slave db */
 	      new_state = HA_LOG_APPLIER_STATE_DONE;
 
@@ -10447,7 +10638,8 @@ la_check_mem_size (void)
 }
 
 int
-la_commit_transaction (unsigned long long applied_item_count, UINT64 *db_commit_usec, UINT64 *post_commit_cleanup_usec)
+la_commit_transaction (unsigned long long applied_item_count, const LOG_LSA * commit_lsa, UINT64 *db_commit_usec,
+		       UINT64 *post_commit_cleanup_usec)
 {
   int error = NO_ERROR;
   static CUB_THREAD_LOCAL int last_time = 0;
@@ -10493,6 +10685,7 @@ la_commit_transaction (unsigned long long applied_item_count, UINT64 *db_commit_
       LA_TIME_ACCUM_USEC (timer_begin, *db_commit_usec);
     }
 #endif /* !NDEBUG */
+
   if (error != NO_ERROR)
     {
       return error;
@@ -10725,6 +10918,7 @@ la_lock_dbname (int *lockf_vdes, char *db_name, char *log_path)
   assert_release ((*lockf_vdes) != NULL_VOLDES);
 
   la_Info.is_role_changed = false;
+  la_Drain_wait_start_ns = 0;
 
   return error;
 }
@@ -10748,6 +10942,7 @@ la_unlock_dbname (int *lockf_vdes, char *db_name, bool clear_owner)
     }
 
   la_Info.is_role_changed = false;
+  la_Drain_wait_start_ns = 0;
 
   if (clear_owner)
     {
@@ -10784,6 +10979,7 @@ la_init (const char *log_path, const int max_mem_size)
 
   la_Info.last_deleted_archive_num = -1;
   la_Info.is_role_changed = false;
+  la_Drain_wait_start_ns = 0;
   la_Info.is_apply_info_updated = false;
 
 #if !defined (NDEBUG)
@@ -11875,6 +12071,18 @@ check_reinit_copylog (void)
 
   if (la_Info.act_log.log_hdr->mark_will_del)
     {
+      /* TEST ONLY (mark_will_del 진단): copylogdb 가 켜 둔 mark_will_del 을 applier 가 읽은 순간이다.
+       * 이 뒤로 복제 로그/카탈로그를 재초기화(-1040)하고 프로세스를 재시작한다. 헤더의 생성/복원
+       * 시각과 진행 좌표를 함께 남겨, 실제 peer 재생성인지 오판인지 대조할 수 있게 한다. */
+      er_log_debug (ARG_FILE_LINE,
+		    "applier detected mark_will_del=true -> reinit copylog (db_creation=%lld db_restore_time=%lld "
+		    "append_lsa=%lld|%d eof_lsa=%lld|%d)\n",
+		    (long long) la_Info.act_log.log_hdr->db_creation,
+		    (long long) la_Info.act_log.log_hdr->db_restore_time,
+		    (long long) la_Info.act_log.log_hdr->append_lsa.pageid,
+		    (int) la_Info.act_log.log_hdr->append_lsa.offset,
+		    (long long) la_Info.act_log.log_hdr->eof_lsa.pageid, (int) la_Info.act_log.log_hdr->eof_lsa.offset);
+
       la_Info.reinit_copylog = true;
       return ER_FAILED;
     }
@@ -12294,11 +12502,30 @@ la_apply_log_file (const char *database_name, const char *log_path, const int ma
 		  && !LSA_ISNULL (&la_Info.final_lsa)
 		  && la_Info.final_lsa.pageid <= final_log_hdr.append_lsa.pageid)
 		{
-		  /* Catch-up is done and the master is idle, so treating the read
-		   * position as the applied position is normally correct. Copy only
-		   * when final_lsa is in range; a torn/garbage final_lsa must not be
-		   * promoted into committed_lsa (which is persisted right below). */
-		  LSA_COPY (&la_Info.committed_lsa, &la_Info.final_lsa);
+		  LOG_LSA sync_lsa;
+
+		  /* Catch-up is done and the master is idle. Copy only when final_lsa
+		   * is in range; a torn/garbage final_lsa must not be promoted into
+		   * committed_lsa (which is persisted right below). */
+		  LSA_COPY (&sync_lsa, &la_Info.final_lsa);
+
+		  /* The read position alone does not prove the work is applied:
+		   * transactions can still be parked in the dependency gate or running
+		   * on workers. committed_lsa promises "everything at or below is
+		   * applied", so it must never pass la_Gate_frontier, the only
+		   * authority that certifies gap-free completion. Before the frontier
+		   * is seeded nothing has entered the pipeline, so the read position
+		   * is safe to use as-is. */
+		  if (la_Gate_frontier_seeded && !LSA_ISNULL (&la_Gate_frontier) && LSA_GT (&sync_lsa, &la_Gate_frontier))
+		    {
+		      LSA_COPY (&sync_lsa, &la_Gate_frontier);
+		    }
+
+		  /* advance only — a persisted watermark must never retreat */
+		  if (LSA_GT (&sync_lsa, &la_Info.committed_lsa))
+		    {
+		      LSA_COPY (&la_Info.committed_lsa, &sync_lsa);
+		    }
 		}
 	      else if (final_log_hdr.ha_server_state != HA_SERVER_STATE_DEAD)
 		{
@@ -12678,6 +12905,34 @@ la_apply_log_file (const char *database_name, const char *log_path, const int ma
 	  /* there is no something new */
 	  if (LSA_EQ (&old_lsa, &la_Info.final_lsa))
 	    {
+	      /* writeset PoC drain backstop: la_change_state() (Hook A) holds DONE open while the
+	       * gate still has work in flight. If that work never finishes -- a stuck/dead worker,
+	       * a lost wakeup -- the applier would otherwise idle-poll here forever without ever
+	       * reaching DONE. Cap the wait so a hung drain surfaces as a restart instead of a
+	       * silent hang; the restart replays from the frontier and converges on the same state. */
+	      if (la_drain_enabled () && la_Info.is_role_changed == true && !la_gate_drain_complete ())
+		{
+		  if (la_Drain_wait_start_ns == 0)
+		    {
+		      la_Drain_wait_start_ns = la_clock_ns ();
+		    }
+		  else if ((la_clock_ns () - la_Drain_wait_start_ns) / 1000000ULL
+			   > (UINT64) prm_get_integer_value (PRM_ID_HA_APPLYLOGDB_DRAIN_TIMEOUT_MSEC))
+		    {
+		      char buffer[256];
+
+		      snprintf (buffer, sizeof (buffer),
+				"writeset drain: gate did not drain within %d msec (pending=%d dispatch_order=%d "
+				"order_fifo=%d); giving up and restarting",
+				prm_get_integer_value (PRM_ID_HA_APPLYLOGDB_DRAIN_TIMEOUT_MSEC),
+				(la_Gate_pending_head != NULL), la_Dispatch_order.count, (la_Gate_order_head != NULL));
+		      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, ER_HA_GENERIC_ERROR, 1, buffer);
+
+		      la_applier_need_shutdown = true;
+		      break;
+		    }
+		}
+
 	      usleep (100 * 1000);
 	      continue;
 	    }
