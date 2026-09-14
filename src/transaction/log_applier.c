@@ -343,6 +343,15 @@ struct la_apply_stats
   unsigned long fail_counter;
   int num_unflushed;
   char last_class_name[DB_MAX_IDENTIFIER_LENGTH];
+  /* writeset restart recovery: true when this transaction's commit LSA falls inside the
+   * restart recovery window (already committed at the master before this process restarted
+   * but re-fed from the copy log). Set once at la_apply_repl_log entry, lives for the whole
+   * transaction, and lets the flush error path suppress re-applicability errors. */
+  bool in_recovery_window;
+  /* count of re-applicability errors suppressed inside the recovery window (INSERT unique
+   * duplicate, DELETE/UPDATE target missing). Summed into la_Info.recovery_skipped_counter
+   * by the leader, alongside fail_counter. */
+  unsigned long recovery_skipped_counter;
 };
 
 typedef struct la_apply_result LA_APPLY_RESULT;
@@ -479,6 +488,12 @@ struct la_info
   LOG_LSA committed_rep_lsa;	/* last committed replication log lsa */
   LOG_LSA last_committed_lsa;	/* last committed commit log lsa at the beginning of the applylogdb */
   LOG_LSA last_committed_rep_lsa;	/* last committed replication log lsa at the beginning of the applylogdb */
+  /* writeset restart recovery: upper bound of the restart recovery window. Snapshot of the
+   * final_lsa restored from _db_ha_apply_info at boot, captured before la_apply_pre overwrites
+   * final_lsa with committed_lsa. NULL on a fresh start (no apply info row) so the window is
+   * empty. Set once at boot, then invariant for the run - workers only read it. */
+  LOG_LSA recovery_boundary_lsa;
+  unsigned long recovery_skipped_counter;	/* re-applicability errors suppressed within the recovery window */
 
   LA_APPLY **repl_lists;
   int repl_cnt;			/* the # of elements of repl_lists */
@@ -2562,6 +2577,7 @@ la_retire_ready_results (void)
       la_Info.delete_counter += result->stats.delete_counter;
       la_Info.schema_counter += result->stats.schema_counter;
       la_Info.fail_counter += result->stats.fail_counter;
+      la_Info.recovery_skipped_counter += result->stats.recovery_skipped_counter;
       la_Info.num_unflushed += result->stats.num_unflushed;
 
       if (result->rectype == LOG_COMMIT)
@@ -5167,6 +5183,13 @@ la_get_last_ha_applied_info (void)
       LSA_COPY (&la_Info.eof_lsa, &apply_info.eof_lsa);
       LSA_COPY (&la_Info.final_lsa, &apply_info.final_lsa);
       LSA_COPY (&la_Info.required_lsa, &apply_info.required_lsa);
+
+      /* writeset restart recovery: capture the restored final_lsa as the recovery window
+       * boundary now, before la_apply_pre resets final_lsa to committed_lsa. Copied straight
+       * from the restored value (not via committed_lsa) so the window upper bound is exactly
+       * where this process resumes reading. Only reached when an apply info row exists; a
+       * fresh start (res == 0) leaves the boundary NULL, making the window empty. */
+      LSA_COPY (&la_Info.recovery_boundary_lsa, &apply_info.final_lsa);
 
       la_Info.insert_counter = apply_info.insert_counter;
       la_Info.update_counter = apply_info.update_counter;
@@ -8245,12 +8268,43 @@ la_flush_repl_items (bool immediate, LA_APPLY_STATS * stats)
 		  assert (false);
 		}
 
-	      er_stack_push ();
-	      er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, la_err_code, 4, class_name, pkey_str, flush_err->error_code,
-		      server_err_msg);
-	      er_stack_pop ();
+	      /* writeset restart recovery: inside the recovery window this transaction's rows
+	       * may already be on the slave, so a re-applicability failure is expected rather
+	       * than a real error. Suppress only the whitelisted (operation, server error) pairs
+	       * - INSERT duplicate key, or DELETE/UPDATE target row missing - by skipping er_set
+	       * and the fail_counter bump and tallying them separately. Every other failure, and
+	       * all failures outside the window, are reported unchanged. */
+	      bool recovery_skip = false;
+	      if (stats->in_recovery_window == true)
+		{
+		  if (LC_IS_FLUSH_INSERT (flush_err->operation) == true)
+		    {
+		      recovery_skip = (flush_err->error_code == ER_BTREE_UNIQUE_FAILED);
+		    }
+		  else if (LC_IS_FLUSH_UPDATE (flush_err->operation) == true
+			   || flush_err->operation == LC_FLUSH_DELETE)
+		    {
+		      recovery_skip = (flush_err->error_code == ER_OBJ_OBJECT_NOT_FOUND
+				       || flush_err->error_code == ER_HEAP_UNKNOWN_OBJECT);
+		    }
+		}
 
-	      stats->fail_counter++;
+	      if (recovery_skip == true)
+		{
+		  stats->recovery_skipped_counter++;
+		  er_log_debug (ARG_FILE_LINE,
+				"ws_repl recovery-window skip reapply error: class %s key %s op %d server error %d\n",
+				class_name, pkey_str, flush_err->operation, flush_err->error_code);
+		}
+	      else
+		{
+		  er_stack_push ();
+		  er_set (ER_ERROR_SEVERITY, ARG_FILE_LINE, la_err_code, 4, class_name, pkey_str, flush_err->error_code,
+			  server_err_msg);
+		  er_stack_pop ();
+
+		  stats->fail_counter++;
+		}
 
 	      if (la_restart_on_bulk_flush_error (flush_err->error_code) == true)
 		{
@@ -9423,6 +9477,12 @@ la_apply_statement_log (LA_ITEM * item, LA_APPLY_STATS * stats)
 	      error, error_msg);
       er_stack_pop ();
 
+      /* TODO writeset restart recovery: statement-based replay (DDL such as re-creating an
+       * already-existing object, and statement DML) surfaces errors here through
+       * la_update_query_execute, not through the flush error link, so it needs its own
+       * re-applicability whitelist keyed on statement type. That whitelist is not settled yet,
+       * so the recovery window (stats->in_recovery_window) is deliberately not applied on this
+       * path - statement errors are always reported. */
       stats->fail_counter++;
     }
   return error;
@@ -9510,6 +9570,17 @@ la_apply_repl_log (LA_APPLY_WORKER_CONTEXT * context, LA_APPLY * apply, int rect
   }
 
   assert (rectype == LOG_COMMIT);
+
+  /* writeset restart recovery: decide once, for the whole transaction, whether this commit
+   * sits inside the restart recovery window. Committed at the master before this process
+   * restarted (commit_lsa <= boundary) yet still ahead of what this process has committed
+   * (last_committed_lsa < commit_lsa), so its rows may already be present on the slave. When
+   * set, the flush error path suppresses re-applicability errors for this transaction only.
+   * A NULL boundary (fresh start) makes the window empty. The already-committed check above
+   * guarantees commit_lsa > last_committed_lsa here; the full predicate is kept for clarity. */
+  stats->in_recovery_window = (!LSA_ISNULL (&la_Info.recovery_boundary_lsa)
+			       && LSA_LT (&la_Info.last_committed_lsa, commit_lsa)
+			       && LSA_LE (commit_lsa, &la_Info.recovery_boundary_lsa));
 
   /* la_lock_dbname 은 리더가 기동 시 선행 획득한다. 워커에서는 호출하지 않음. */
 
@@ -9690,6 +9761,7 @@ la_apply_commit_list (LOG_LSA * lsa, LOG_PAGEID final_pageid)
       la_Info.delete_counter += stats.delete_counter;
       la_Info.schema_counter += stats.schema_counter;
       la_Info.fail_counter += stats.fail_counter;
+      la_Info.recovery_skipped_counter += stats.recovery_skipped_counter;
       la_Info.num_unflushed += stats.num_unflushed;
 
       LSA_COPY (lsa, &commit->log_lsa);
@@ -10976,6 +11048,9 @@ la_init (const char *log_path, const int max_mem_size)
   LSA_SET_NULL (&la_Info.final_lsa);
   LSA_SET_NULL (&la_Info.last_committed_lsa);
   LSA_SET_NULL (&la_Info.last_committed_rep_lsa);
+  /* NULL boundary = empty recovery window; the boot path fills it only when an apply info
+   * row already exists (restart), leaving it NULL on a fresh start. */
+  LSA_SET_NULL (&la_Info.recovery_boundary_lsa);
 
   la_Info.last_deleted_archive_num = -1;
   la_Info.is_role_changed = false;
