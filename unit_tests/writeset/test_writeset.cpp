@@ -560,6 +560,80 @@ TEST_CASE ("a FLOAT or DOUBLE -0.0 key hashes as +0.0", "[writeset]")
   }
 }
 
+TEST_CASE ("a MONETARY key hashes its amount without the currency", "[writeset]")
+{
+  /* The index compares MONETARY keys by amount only, so $100 and KRW 100 are one key and must have one hash,
+   * though each packs its own currency; a -0.0 amount is the same key as 0.0; another amount must not match. */
+  ws_history_guard history;
+  OID class_oid = oid_of (1, 205, 1);
+
+  SECTION ("WRITE of one amount in two currencies and a REF share one hash")
+  {
+    TP_DOMAIN *domain = tp_domain_resolve_default (DB_TYPE_MONETARY);
+    DB_VALUE dollar;
+    DB_VALUE won;
+    DB_VALUE other;
+    log_tdes *child = make_tdes (2);
+
+    REQUIRE (domain != NULL);
+    db_make_monetary (&dollar, DB_CURRENCY_DOLLAR, 100.0);
+    db_make_monetary (&won, DB_CURRENCY_WON, 100.0);
+    db_make_monetary (&other, DB_CURRENCY_DOLLAR, 101.0);
+
+    REQUIRE (write_key_hash (&class_oid, &dollar) == write_key_hash (&class_oid, &won));
+    REQUIRE (write_key_hash (&class_oid, &dollar) != write_key_hash (&class_oid, &other));
+
+    REQUIRE (wset_add_ref_key (child, &class_oid, &WS_DEFAULT_VFID, &won, domain) == NO_ERROR);
+    REQUIRE (child->wset_hashes.size () == 1);
+    REQUIRE (child->wset_hashes[0].hash == write_key_hash (&class_oid, &dollar));
+
+    delete child;
+  }
+
+  SECTION ("a -0.0 amount and 0.0 give one hash")
+  {
+    DB_VALUE plus_zero;
+    DB_VALUE minus_zero;
+
+    db_make_monetary (&plus_zero, DB_CURRENCY_DOLLAR, 0.0);
+    db_make_monetary (&minus_zero, DB_CURRENCY_YEN, -0.0);
+    REQUIRE (std::signbit (db_get_monetary (&minus_zero)->amount));
+
+    REQUIRE (write_key_hash (&class_oid, &plus_zero) == write_key_hash (&class_oid, &minus_zero));
+  }
+
+  SECTION ("composite key: MONETARY elements in two currencies give one hash")
+  {
+    TP_DOMAIN *element_domain = tp_domain_resolve_default (DB_TYPE_MONETARY);
+    TP_DOMAIN *key_domain;
+    DB_VALUE value;
+    DB_VALUE key_dollar;
+    DB_VALUE key_won;
+    DB_VALUE key_other;
+    log_tdes *child = make_tdes (2);
+
+    REQUIRE (element_domain != NULL);
+    db_make_monetary (&value, DB_CURRENCY_DOLLAR, 100.0);
+    make_value_int_key (&key_dollar, &key_domain, element_domain, &value, 1);
+    db_make_monetary (&value, DB_CURRENCY_WON, 100.0);
+    make_value_int_key (&key_won, &key_domain, element_domain, &value, 1);
+    db_make_monetary (&value, DB_CURRENCY_DOLLAR, 101.0);
+    make_value_int_key (&key_other, &key_domain, element_domain, &value, 1);
+
+    REQUIRE (write_key_hash (&class_oid, &key_dollar) == write_key_hash (&class_oid, &key_won));
+    REQUIRE (write_key_hash (&class_oid, &key_dollar) != write_key_hash (&class_oid, &key_other));
+
+    REQUIRE (wset_add_ref_key (child, &class_oid, &WS_DEFAULT_VFID, &key_won, key_domain) == NO_ERROR);
+    REQUIRE (child->wset_hashes.size () == 1);
+    REQUIRE (child->wset_hashes[0].hash == write_key_hash (&class_oid, &key_dollar));
+
+    pr_clear_value (&key_dollar);
+    pr_clear_value (&key_won);
+    pr_clear_value (&key_other);
+    delete child;
+  }
+}
+
 /* Set ignore_trailing_space for one test and restore the previous value when the test ends. */
 struct ws_trailing_space_guard
 {

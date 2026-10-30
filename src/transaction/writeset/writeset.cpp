@@ -74,6 +74,7 @@ static void wset_pack_string_key (const LANG_COLLATION *lc, DB_TYPE type, const 
 static UINT64 wset_string_hash (const VFID *index_vfid, DB_VALUE *v);
 static DB_VALUE *wset_value_without_zone (DB_VALUE *v, DB_VALUE *scratch);
 static DB_VALUE *wset_value_without_negative_zero (DB_VALUE *v, DB_VALUE *scratch);
+static DB_VALUE *wset_value_without_currency (DB_VALUE *v, DB_VALUE *scratch);
 static int wset_midxkey_hash (const VFID *index_vfid, DB_VALUE *key, UINT64 *hash_out);
 static const char *wset_kind_name (LOG_WSET_KIND kind);
 static const char *wset_fallback_reason_name (WSET_FALLBACK_REASON reason);
@@ -378,6 +379,36 @@ wset_value_without_negative_zero (DB_VALUE *v, DB_VALUE *scratch)
 }
 
 /*
+ * wset_value_without_currency - the value hashed for a MONETARY key value, without its currency
+ *
+ *   v(in): key value
+ *   scratch(out): holds the value returned when v is a MONETARY value
+ *
+ * return: scratch holding the amount in a fixed currency for a MONETARY value, or v itself for any other value
+ *
+ * Note: A MONETARY value packs its currency with its amount, but the index compares the amounts only
+ *       (mr_cmpval_money, mr_index_cmpdisk_money), so $100 and \100 are one key. For example, T1 deletes k = $100
+ *       and T2 inserts k = \100. With the currency the hashes differ, T2 gets no dependency, and the slave can
+ *       insert first and fail on the unique key. The amount is hashed in one fixed currency, and a -0.0 amount as
+ *       +0.0, which the compare also treats as equal.
+ */
+static DB_VALUE *
+wset_value_without_currency (DB_VALUE *v, DB_VALUE *scratch)
+{
+  double amount;
+
+  if (DB_IS_NULL (v) || DB_VALUE_DOMAIN_TYPE (v) != DB_TYPE_MONETARY)
+    {
+      return v;
+    }
+
+  amount = db_get_monetary (v)->amount;
+  db_make_monetary (scratch, DB_CURRENCY_DOLLAR, (amount == 0.0) ? 0.0 : amount);
+
+  return scratch;
+}
+
+/*
  * wset_midxkey_hash - hash a composite key element by element
  *
  *   index_vfid(in): index VFID used by the writeset key
@@ -473,9 +504,11 @@ wset_midxkey_hash (const VFID *index_vfid, DB_VALUE *key, UINT64 *hash_out)
 	    {
 	      DB_VALUE zone_free;
 	      DB_VALUE sign_free;
+	      DB_VALUE currency_free;
 	      DB_VALUE *hashed = wset_value_without_zone (&element, &zone_free);
 
 	      hashed = wset_value_without_negative_zero (hashed, &sign_free);
+	      hashed = wset_value_without_currency (hashed, &currency_free);
 
 	      /* 0xC1 tag followed by the packed element in its aligned size, so the layout does not depend on
 	       * how much of that size the packer used. or_pack_mem_value aligns its start and its value to
@@ -661,14 +694,16 @@ wset_fallback_to_commit_order (LOG_TDES *tdes, WSET_FALLBACK_REASON reason)
  *       (wset_string_hash), so collation-equal strings produce one hash;
  *       a composite key is reduced element by element the same way (wset_midxkey_hash);
  *       every other type is hashed over its packed bytes, a TIMESTAMPTZ or DATETIMETZ value without
- *       its zone (wset_value_without_zone) and a FLOAT or DOUBLE -0.0 as +0.0
- *       (wset_value_without_negative_zero).
+ *       its zone (wset_value_without_zone), a FLOAT or DOUBLE -0.0 as +0.0
+ *       (wset_value_without_negative_zero) and a MONETARY value without its currency
+ *       (wset_value_without_currency).
  */
 int
 wset_add_write_key (LOG_TDES *tdes, const OID *class_oid, const VFID *index_vfid, DB_VALUE *key)
 {
   DB_VALUE zone_free;
   DB_VALUE sign_free;
+  DB_VALUE currency_free;
   DB_VALUE *hashed;
   char *buf = NULL;
   UINT64 hash;
@@ -728,6 +763,7 @@ wset_add_write_key (LOG_TDES *tdes, const OID *class_oid, const VFID *index_vfid
 
   hashed = wset_value_without_zone (key, &zone_free);
   hashed = wset_value_without_negative_zero (hashed, &sign_free);
+  hashed = wset_value_without_currency (hashed, &currency_free);
 
   buf_len = OR_VALUE_ALIGNED_SIZE (hashed);
   buf = (char *) malloc ((size_t) buf_len);
@@ -954,6 +990,7 @@ wset_add_ref_key (LOG_TDES *tdes, const OID *ref_class_oid,
   DB_VALUE casted;
   DB_VALUE zone_free;
   DB_VALUE sign_free;
+  DB_VALUE currency_free;
   DB_VALUE *hashed;
   char *buf = NULL;
   UINT64 hash;
@@ -1038,6 +1075,7 @@ wset_add_ref_key (LOG_TDES *tdes, const OID *ref_class_oid,
 
   hashed = wset_value_without_zone (&casted, &zone_free);
   hashed = wset_value_without_negative_zero (hashed, &sign_free);
+  hashed = wset_value_without_currency (hashed, &currency_free);
 
   buf_len = OR_VALUE_ALIGNED_SIZE (hashed);
   buf = (char *) malloc ((size_t) buf_len);
